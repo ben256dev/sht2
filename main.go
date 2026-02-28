@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -154,8 +155,50 @@ func upload(w http.ResponseWriter, r *http.Request) {
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
 
+	src := io.Reader(r.Body)
+	contentType := r.Header.Get("Content-Type")
+	if contentType != "" {
+		mediaType, _, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			http.Error(w, "invalid content-type", http.StatusBadRequest)
+			return
+		}
+		if mediaType == "multipart/form-data" {
+			mr, err := r.MultipartReader()
+			if err != nil {
+				http.Error(w, "invalid multipart body", http.StatusBadRequest)
+				return
+			}
+
+			var filePart io.ReadCloser
+			for {
+				part, err := mr.NextPart()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					http.Error(w, "invalid multipart body", http.StatusBadRequest)
+					return
+				}
+
+				if part.FileName() != "" || part.FormName() == "file" {
+					filePart = part
+					break
+				}
+				_ = part.Close()
+			}
+
+			if filePart == nil {
+				http.Error(w, "multipart missing file part", http.StatusBadRequest)
+				return
+			}
+			defer filePart.Close()
+			src = filePart
+		}
+	}
+
 	h := blake3.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), r.Body)
+	n, err := io.Copy(io.MultiWriter(tmp, h), src)
 	if err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
@@ -237,6 +280,30 @@ func serveByID(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, id, st.ModTime(), f)
 }
 
+func setCORS(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return
+	}
+
+	// For dev/open use:
+	// w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Safer: reflect exact origin (works with credentials too)
+	w.Header().Set("Vary", "Origin, Access-Control-Request-Headers, Access-Control-Request-Method")
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Methods", "POST, PUT, GET, HEAD, OPTIONS")
+	reqHeaders := r.Header.Get("Access-Control-Request-Headers")
+	if reqHeaders != "" {
+		w.Header().Set("Access-Control-Allow-Headers", reqHeaders)
+	} else {
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Cache-Control, Pragma")
+	}
+	// Uncomment only if needed:
+	// w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Access-Control-Max-Age", "86400")
+}
+
 func main() {
 	_ = godotenv.Load()
 
@@ -252,6 +319,13 @@ func main() {
 	limits = cfg
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		setCORS(w, r)
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
 		if r.URL.Path == "/" {
 			if r.Method == "POST" || r.Method == "PUT" {
 				upload(w, r)
