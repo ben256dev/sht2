@@ -9,6 +9,7 @@ import (
     "net/http"
     "os"
     "path/filepath"
+    "strings"
 
     "lukechampine.com/blake3"
 )
@@ -58,7 +59,7 @@ func main() {
         fmt.Fprintln(w, "pong")
     })
 
-    mux.HandleFunc("/blobs", func(w http.ResponseWriter, r *http.Request) {
+    mux.HandleFunc("/blob", func(w http.ResponseWriter, r *http.Request) {
         if r.Method != http.MethodPost {
             http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
             return
@@ -101,6 +102,40 @@ func main() {
         }
 
         fmt.Fprintln(w, `{"digest":"%s","size":%d}`, dgst, n)
+    })
+
+    mux.HandleFunc("/blob/", func(w http.ResponseWriter, r *http.Request) {
+        if r.Method != http.MethodGet {
+            http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+            return
+        }
+
+        digest := strings.TrimPrefix(r.URL.Path, "/blob/")
+        if digest == "" || strings.Contains(digest, "/") || strings.Contains(digest, "..") {
+            http.Error(w, "invalid digest", http.StatusBadRequest)
+            return
+        }
+
+        path := blobPath(digest)
+
+        f, err := os.Open(path)
+        if os.IsNotExist(err) {
+            http.Error(w, "blob not found", http.StatusNotFound)
+            return
+        }
+        if err != nil {
+            http.Error(w, "failed to open blob", http.StatusInternalServerError)
+            return
+        }
+        defer f.Close()
+
+        info, err := f.Stat()
+        if err != nil {
+            http.Error(w, "failed to stat blob", http.StatusInternalServerError)
+            return
+        }
+
+        http.ServeContent(w, r, digest, info.ModTime(), f)
     })
 
     log.Println("Listening on ", path)
