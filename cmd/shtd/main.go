@@ -2,6 +2,7 @@ package main
 
 import (
     "encoding/base64"
+    "encoding/json"
     "fmt"
     "io"
     "log"
@@ -30,6 +31,12 @@ func getenv(key, fallback string) string {
 
 func blobPath(digest string) string {
 	return filepath.Join(blobDir, digest)
+}
+
+type StoreBlobResponse struct {
+	Digest string `json:"digest"`
+	Size   int64  `json:"size"`
+	Exists bool   `json:"exists"`
 }
 
 func main() {
@@ -68,41 +75,66 @@ func main() {
 
         defer r.Body.Close()
 
-        h := blake3.New(32, nil)
-
         tmp, err := os.CreateTemp(tmpDir, "blob-*")
-        if (err != nil) {
-            http.Error(w, "failed to create temp file", http.StatusInternalServerError)
+        if err != nil {
+            http.Error(w, "temp failed", http.StatusInternalServerError)
             return
         }
-        defer os.Remove(tmp.Name())
+
+        tmpName := tmp.Name()
+        closed := false
+        ok := false
+
+        defer func() {
+            if !closed {
+                tmp.Close()
+            }
+            if !ok {
+                os.Remove(tmpName)
+            }
+        }()
+
+        h := blake3.New(32, nil)
 
         n, err := io.Copy(io.MultiWriter(tmp, h), r.Body)
         if err != nil {
-            http.Error(w, "upload failed", http.StatusInternalServerError)
+            http.Error(w, "upload failed", http.StatusBadRequest)
             return
         }
-
-        dgst := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
 
         if err := tmp.Close(); err != nil {
-            http.Error(w, "failed to close temp file", http.StatusInternalServerError)
+            http.Error(w, "close failed", http.StatusInternalServerError)
             return
         }
+        closed = true
 
-        final := blobPath(dgst)
+        digest := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
+        final := blobPath(digest)
 
         if _, err := os.Stat(final); err == nil {
-            fmt.Fprintf(w, `{"digest":"%s","size":%d,"exists":true}`, dgst, n)
+            ok = true
+            w.Header().Set("Content-Type", "application/json")
+            json.NewEncoder(w).Encode(StoreBlobResponse{
+                Digest: digest,
+                Size:   n,
+                Exists: true,
+            })
             return
         }
 
-        if err := os.Rename(tmp.Name(), final); err != nil {
-            http.Error(w, "failed to store blob", http.StatusInternalServerError)
+        if err := os.Rename(tmpName, final); err != nil {
+            http.Error(w, "rename failed", http.StatusInternalServerError)
             return
         }
 
-        fmt.Fprintf(w, `{"digest":"%s","size":%d,"exists":false}`, dgst, n)
+        ok = true
+
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(StoreBlobResponse{
+            Digest: digest,
+            Size:   n,
+            Exists: false,
+        })
     })
 
     mux.HandleFunc("/blob/", func(w http.ResponseWriter, r *http.Request) {
