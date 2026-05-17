@@ -29,7 +29,10 @@ func getenv(key, fallback string) string {
 }
 
 func blobPath(digest string) string {
-	return filepath.Join(blobDir, digest)
+    if (len(digest) < 3) {
+        return filepath.Join(blobDir, digest)
+    }
+    return filepath.Join(blobDir, digest[:2], digest[2:])
 }
 
 type StoreBlobResponse struct {
@@ -106,6 +109,11 @@ func main() {
 
         digest := base64.RawURLEncoding.EncodeToString(h.Sum(nil))
         final := blobPath(digest)
+
+        if err := os.MkdirAll(filepath.Dir(final), 0755); err != nil {
+            http.Error(w, "mkdir failed", http.StatusInternalServerError)
+            return
+        }
 
         if _, err := os.Stat(final); err == nil {
             ok = true
