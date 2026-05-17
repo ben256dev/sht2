@@ -17,6 +17,7 @@ import (
 var (
 	blobDir = getenv("SHT_BLOB_DIR", "/var/lib/sht/blobs")
 	tmpDir  = getenv("SHT_TMP_DIR", "/var/lib/sht/tmp")
+	sockDir  = getenv("SHT_SOCK_DIR", "/run/sht/sht.sock")
 )
 
 func getenv(key, fallback string) string {
@@ -32,7 +33,7 @@ func blobPath(digest string) string {
 }
 
 func main() {
-    path := "/run/sht/sht.sock"
+    path := sockDir
 
     os.Remove(path)
 
@@ -101,11 +102,11 @@ func main() {
             return
         }
 
-        fmt.Fprintln(w, `{"digest":"%s","size":%d}`, dgst, n)
+        fmt.Fprintf(w, `{"digest":"%s","size":%d,"exists":false}`, dgst, n)
     })
 
     mux.HandleFunc("/blob/", func(w http.ResponseWriter, r *http.Request) {
-        if r.Method != http.MethodGet {
+        if r.Method != http.MethodGet && r.Method != http.MethodHead {
             http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
             return
         }
