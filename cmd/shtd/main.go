@@ -3,7 +3,6 @@ package main
 import (
     "encoding/base64"
     "encoding/json"
-    "fmt"
     "io"
     "log"
     "net"
@@ -63,9 +62,6 @@ func main() {
     }
 
     mux := http.NewServeMux()
-    mux.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
-        fmt.Fprintln(w, "pong")
-    })
 
     mux.HandleFunc("/blob", func(w http.ResponseWriter, r *http.Request) {
         if r.Method != http.MethodPost {
@@ -113,12 +109,17 @@ func main() {
 
         if _, err := os.Stat(final); err == nil {
             ok = true
+            os.Remove(tmpName)
+
             w.Header().Set("Content-Type", "application/json")
             json.NewEncoder(w).Encode(StoreBlobResponse{
                 Digest: digest,
                 Size:   n,
                 Exists: true,
             })
+            return
+        } else if !os.IsNotExist(err) {
+            http.Error(w, "failed to stat final blob", http.StatusInternalServerError)
             return
         }
 
