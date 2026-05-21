@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -135,6 +136,26 @@ func commandArgs() []string {
 }
 
 func main() {
+	if len(os.Args) != 3 || os.Args[1] != "id" {
+		for i, arg := range os.Args {
+			if i == 0 {
+				fmt.Print("malformed command: ", arg)
+				continue
+			}
+			fmt.Print(" ", arg)
+		}
+		fmt.Println()
+		fmt.Println("	1. use command=\"sht id <key id>\" for each key in authorized_keys")
+		die("	2. don't use ForceCommand in sshd_config")
+	}
+
+	id, err := strconv.ParseInt(os.Args[2], 10, 64)
+	if err != nil || id <= 0 {
+		die("invalid key id")
+	}
+
+	fmt.Println("key id:", id)
+
 	args := commandArgs()
 
 	if len(args) == 0 {
