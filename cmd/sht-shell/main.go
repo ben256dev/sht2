@@ -44,7 +44,7 @@ type StoreBlobResponse struct {
 	Exists bool   `json:"exists"`
 }
 
-func store() {
+func store(keyID int64) {
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -53,11 +53,14 @@ func store() {
 		},
 	}
 
-	resp, err := client.Post(
-		"http://sht/blob",
-		"text/plain",
-		os.Stdin,
-	)
+	req, err := http.NewRequest(http.MethodPost, "http://sht/blob", os.Stdin)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -76,7 +79,7 @@ func store() {
 	fmt.Println(out.Digest)
 }
 
-func cat(digest string) {
+func cat(digest string, keyID int64) {
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -85,18 +88,28 @@ func cat(digest string) {
 		},
 	}
 
-	resp, err := client.Get(
-		fmt.Sprintf("http://sht/blob/%s", digest),
-	)
+	req, err := http.NewRequest(http.MethodGet, "http://sht/blob/"+digest, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	resp, err := client.Do(req)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(os.Stderr, resp.Body)
+		os.Exit(1)
+	}
+
 	io.Copy(os.Stdout, resp.Body)
 }
 
-func stat(digest string) {
+func stat(digest string, keyID int64) {
 	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -109,6 +122,8 @@ func stat(digest string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -159,7 +174,7 @@ func main() {
 	args := commandArgs()
 
 	if len(args) == 0 {
-		store()
+		store(id)
 		return
 	}
 
@@ -168,12 +183,12 @@ func main() {
 		if len(args) != 2 {
 			die("usage: sht stat <digest>")
 		}
-		stat(args[1])
+		stat(args[1], id)
 	case "cat":
 		if len(args) != 2 {
 			die("usage: sht cat <digest>")
 		}
-		cat(args[1])
+		cat(args[1], id)
 	case "help", "-h", "--help":
 		usage()
 	default:
