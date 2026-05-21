@@ -22,7 +22,7 @@ func getenv(key, fallback string) string {
 }
 
 var (
-	sockDir  = getenv("SHT_SOCK_DIR", "/run/sht/sht.sock")
+	sockDir = getenv("SHT_SOCK_DIR", "/run/sht/sht.sock")
 )
 
 func usage() {
@@ -144,10 +144,7 @@ func stat(digest string, keyID int64) {
 }
 
 func commandArgs() []string {
-	if s := os.Getenv("SSH_ORIGINAL_COMMAND"); s != "" {
-		return strings.Fields(s)
-	}
-	return os.Args[1:]
+	return strings.Fields(os.Getenv("SSH_ORIGINAL_COMMAND"))
 }
 
 func main() {
@@ -168,8 +165,6 @@ func main() {
 	if err != nil || id <= 0 {
 		die("invalid key id")
 	}
-
-	fmt.Println("key id:", id)
 
 	args := commandArgs()
 

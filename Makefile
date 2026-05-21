@@ -1,9 +1,18 @@
-.PHONY: build rebuild clean test
+.PHONY: build install restart deploy rebuild clean test
 
 build:
 	mkdir -p bin
 	go build -o bin/shtd ./cmd/shtd
 	go build -o bin/sht-shell ./cmd/sht-shell
+
+install: build
+	install -m 0755 bin/shtd /usr/local/bin/shtd
+	install -m 0755 bin/sht-shell /usr/local/bin/sht-shell
+
+restart:
+	systemctl restart shtd
+
+deploy: install restart
 
 rebuild: clean build
 

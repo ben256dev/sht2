@@ -10,6 +10,31 @@ setup_test_env() {
   export SHT_SOCK_DIR="$TEST_TMPDIR/sht.sock"
   export SHT_BLOB_DIR="$TEST_TMPDIR/blobs"
   export SHT_TMP_DIR="$TEST_TMPDIR/tmp"
+  export SHT_DB_PATH="$TEST_TMPDIR/sht.db"
+  seed_test_db
+}
+
+seed_test_db() {
+  sqlite3 "$SHT_DB_PATH" <<'SQL'
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS key_ids (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(user_id) REFERENCES users(id)
+);
+INSERT OR REPLACE INTO users (id, name, enabled) VALUES (1, 'test-user-1', 1);
+INSERT OR REPLACE INTO users (id, name, enabled) VALUES (2, 'test-user-2', 1);
+INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (1, 1, 'test-key-1', 1);
+INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (2, 2, 'test-key-2', 1);
+SQL
 }
 
 teardown_test_env() {
