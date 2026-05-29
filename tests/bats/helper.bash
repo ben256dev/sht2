@@ -11,6 +11,8 @@ setup_test_env() {
   export SHT_BLOB_DIR="$TEST_TMPDIR/blobs"
   export SHT_TMP_DIR="$TEST_TMPDIR/tmp"
   export SHT_DB_PATH="$TEST_TMPDIR/sht.db"
+  unset SHT_SOCK_MODE
+  unset SHT_SOCK_GROUP
   seed_test_db
 }
 
@@ -20,6 +22,7 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   enabled INTEGER NOT NULL DEFAULT 1,
+  max_bytes INTEGER NOT NULL DEFAULT 32212254720,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS key_ids (
@@ -30,10 +33,23 @@ CREATE TABLE IF NOT EXISTS key_ids (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(user_id) REFERENCES users(id)
 );
-INSERT OR REPLACE INTO users (id, name, enabled) VALUES (1, 'test-user-1', 1);
-INSERT OR REPLACE INTO users (id, name, enabled) VALUES (2, 'test-user-2', 1);
+CREATE TABLE IF NOT EXISTS blob_refs (
+  user_id INTEGER NOT NULL,
+  key_id INTEGER NOT NULL,
+  digest TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (user_id, digest),
+  FOREIGN KEY(user_id) REFERENCES users(id),
+  FOREIGN KEY(key_id) REFERENCES key_ids(id)
+);
+CREATE INDEX IF NOT EXISTS blob_refs_user_id ON blob_refs(user_id);
+CREATE INDEX IF NOT EXISTS blob_refs_digest ON blob_refs(digest);
+INSERT OR REPLACE INTO users (id, name, enabled, max_bytes) VALUES (1, 'test-user-1', 1, 32212254720);
+INSERT OR REPLACE INTO users (id, name, enabled, max_bytes) VALUES (2, 'test-user-2', 1, 32212254720);
 INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (1, 1, 'test-key-1', 1);
 INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (2, 2, 'test-key-2', 1);
+INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (3, 1, 'test-key-3', 1);
 SQL
 }
 
