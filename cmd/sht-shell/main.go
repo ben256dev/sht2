@@ -32,6 +32,10 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  sht stat    [<digest> ...] # stat blobs; reads whitespace-delimited digests from stdin when none are given")
 	fmt.Fprintln(os.Stderr, "  sht release [<digest> ...] # release blobs; reads whitespace-delimited digests from stdin when none are given")
 	fmt.Fprintln(os.Stderr, "  sht list [-dskcta] # list refs; d=digest, s=size, k=key_id, c=created_at, t=state, a=all")
+	fmt.Fprintln(os.Stderr, "  sht manifest       # create/resume upload from JSON manifest on stdin")
+	fmt.Fprintln(os.Stderr, "  sht upload-chunk <digest> <index> # upload raw chunk bytes from stdin")
+	fmt.Fprintln(os.Stderr, "  sht upload-status <digest> # show resumable upload status")
+	fmt.Fprintln(os.Stderr, "  sht finalize <digest> # finalize a complete resumable upload")
 	fmt.Fprintln(os.Stderr, "  sht help          # show this message")
 }
 
@@ -98,6 +102,25 @@ type BlobRef struct {
 
 type ListRefsResponse struct {
 	Refs []BlobRef `json:"refs"`
+}
+
+type UploadStatusResponse struct {
+	Digest          string  `json:"digest"`
+	Size            int64   `json:"size"`
+	ChunkSize       int64   `json:"chunk_size"`
+	Missing         []int64 `json:"missing"`
+	Uploaded        []int64 `json:"uploaded"`
+	Complete        bool    `json:"complete"`
+	Finalized       bool    `json:"finalized"`
+	PhysicalPending int64   `json:"physical_pending_bytes,omitempty"`
+}
+
+type ChunkUploadResponse struct {
+	Digest      string `json:"digest"`
+	Index       int64  `json:"index"`
+	ChunkDigest string `json:"chunk_digest"`
+	Size        int64  `json:"size"`
+	Exists      bool   `json:"exists"`
 }
 
 func newClient() *http.Client {
@@ -412,6 +435,98 @@ func refs(keyID int64, fields string) {
 	}
 }
 
+func doUploadRequest(req *http.Request, out any) {
+	client := newClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		io.Copy(os.Stderr, resp.Body)
+		os.Exit(1)
+	}
+
+	if out == nil {
+		return
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		die("bad response: %v", err)
+	}
+}
+
+func printJSON(value any) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		die("bad response: %v", err)
+	}
+	fmt.Println(string(data))
+}
+
+func manifest(keyID int64) {
+	req, err := http.NewRequest(http.MethodPost, "http://sht/uploads", os.Stdin)
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	req.Header.Set("Content-Type", "application/json")
+
+	var out UploadStatusResponse
+	doUploadRequest(req, &out)
+	printJSON(out)
+}
+
+func uploadChunk(keyID int64, args []string) {
+	if len(args) != 2 {
+		die("usage: sht upload-chunk <digest> <index>")
+	}
+	index, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil || index < 0 {
+		die("invalid chunk index")
+	}
+
+	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://sht/uploads/%s/chunks/%d", args[0], index), os.Stdin)
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	var out ChunkUploadResponse
+	doUploadRequest(req, &out)
+	printJSON(out)
+}
+
+func uploadStatus(keyID int64, args []string) {
+	if len(args) != 1 {
+		die("usage: sht upload-status <digest>")
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://sht/uploads/"+args[0], nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	var out UploadStatusResponse
+	doUploadRequest(req, &out)
+	printJSON(out)
+}
+
+func finalize(keyID int64, args []string) {
+	if len(args) != 1 {
+		die("usage: sht finalize <digest>")
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://sht/uploads/"+args[0]+"/finalize", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	var out StoreBlobResponse
+	doUploadRequest(req, &out)
+	fmt.Println(out.Digest)
+}
+
 func commandArgs() []string {
 	return strings.Fields(os.Getenv("SSH_ORIGINAL_COMMAND"))
 }
@@ -451,6 +566,17 @@ func main() {
 		release(collectDigests(args[1:], "release"), id)
 	case "list", "refs":
 		refs(id, parseListFields(args[1:]))
+	case "manifest":
+		if len(args) != 1 {
+			die("usage: sht manifest < manifest.json")
+		}
+		manifest(id)
+	case "upload-chunk":
+		uploadChunk(id, args[1:])
+	case "upload-status":
+		uploadStatus(id, args[1:])
+	case "finalize":
+		finalize(id, args[1:])
 	case "help", "-h", "--help":
 		usage()
 	default:

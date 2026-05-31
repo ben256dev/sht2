@@ -49,6 +49,15 @@ blob_file() {
   printf '%s/%s/%s\n' "$SHT_BLOB_DIR" "${digest:0:2}" "${digest:2}"
 }
 
+chunk_file() {
+  local digest="$1"
+  if [ "${#digest}" -lt 3 ]; then
+    printf '%s/chunks/%s\n' "$SHT_BLOB_DIR" "$digest"
+    return
+  fi
+  printf '%s/chunks/%s/%s\n' "$SHT_BLOB_DIR" "${digest:0:2}" "${digest:2}"
+}
+
 manual_gc() {
   local digest
   while IFS= read -r digest; do
@@ -66,6 +75,48 @@ manual_gc() {
       );
   ")
 
+  local chunk_digest
+  while IFS= read -r chunk_digest; do
+    [ -n "$chunk_digest" ] || continue
+    rm -f "$(chunk_file "$chunk_digest")"
+  done < <(sqlite3 "$SHT_DB_PATH" "
+    SELECT DISTINCT dirty_chunks.chunk_digest
+    FROM blob_refs AS dirty_refs
+    JOIN blob_manifest_chunks AS dirty_chunks ON dirty_chunks.digest = dirty_refs.digest
+    WHERE dirty_refs.dirty = 1
+      AND NOT EXISTS (
+        SELECT 1
+        FROM blob_refs AS clean_refs
+        JOIN blob_manifest_chunks AS clean_chunks ON clean_chunks.digest = clean_refs.digest
+        WHERE clean_refs.dirty = 0
+          AND clean_chunks.chunk_digest = dirty_chunks.chunk_digest
+      );
+  ")
+
+  sqlite3 "$SHT_DB_PATH" "
+    DELETE FROM blob_manifest_chunks
+    WHERE digest IN (
+      SELECT dirty_refs.digest
+      FROM blob_refs AS dirty_refs
+      WHERE dirty_refs.dirty = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM blob_refs AS clean_refs
+          WHERE clean_refs.digest = dirty_refs.digest
+            AND clean_refs.dirty = 0
+        )
+    );
+    DELETE FROM blob_manifests
+    WHERE digest IN (
+      SELECT dirty_refs.digest
+      FROM blob_refs AS dirty_refs
+      WHERE dirty_refs.dirty = 1
+        AND NOT EXISTS (
+          SELECT 1 FROM blob_refs AS clean_refs
+          WHERE clean_refs.digest = dirty_refs.digest
+            AND clean_refs.dirty = 0
+        )
+    );
+  "
   sqlite3 "$SHT_DB_PATH" "DELETE FROM blob_refs WHERE dirty = 1; UPDATE users SET pending_bytes = 0"
 }
 
@@ -136,6 +187,7 @@ manual_gc() {
   [[ "$refs" != *"$digest"* ]]
 
   [ ! -e "$(blob_file "$digest")" ]
+  [ "$(find "$SHT_BLOB_DIR/chunks" -type f | wc -l | tr -d ' ')" = "0" ]
 }
 
 @test "shtd manual gc preserves blobs still referenced by another user" {
@@ -156,7 +208,7 @@ manual_gc() {
 
   [[ "$refs_user1" != *"$digest"* ]]
   [ "$body_user2" = "$payload" ]
-  [ -e "$(blob_file "$digest")" ]
+  [ "$(find "$SHT_BLOB_DIR/chunks" -type f | wc -l | tr -d ' ')" = "1" ]
 }
 
 @test "shtd existing global blob does not charge pending quota" {

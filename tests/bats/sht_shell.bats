@@ -176,6 +176,29 @@ teardown() {
   [[ "$output" == *"not found"* ]]
 }
 
+@test "sht-shell resumable upload commands roundtrip" {
+  start_shtd
+
+  digest="10mB76cKDIgLjYwZhdB128v2ebmaX5kU5ar5a4ManiQ"
+  manifest='{"digest":"'"$digest"'","size":11,"chunk_size":8388608,"chunks":[{"index":0,"digest":"'"$digest"'","size":11}]}'
+
+  status="$(printf '%s' "$manifest" | SSH_ORIGINAL_COMMAND='manifest' "$BIN_SHELL" id 1)"
+  [[ "$status" == *'"missing":[0]'* ]]
+
+  chunk_out="$(printf 'hello world' | SSH_ORIGINAL_COMMAND="upload-chunk $digest 0" "$BIN_SHELL" id 1)"
+  [[ "$chunk_out" == *'"index":0'* ]]
+
+  status="$(SSH_ORIGINAL_COMMAND="upload-status $digest" "$BIN_SHELL" id 1)"
+  [[ "$status" == *'"missing":[]'* ]]
+  [[ "$status" == *'"complete":true'* ]]
+
+  finalize_out="$(SSH_ORIGINAL_COMMAND="finalize $digest" "$BIN_SHELL" id 1)"
+  [ "$finalize_out" = "$digest" ]
+
+  cat_out="$(SSH_ORIGINAL_COMMAND="cat $digest" "$BIN_SHELL" id 1)"
+  [ "$cat_out" = "hello world" ]
+}
+
 @test "sht-shell rejects unknown command" {
   run env SSH_ORIGINAL_COMMAND='wat' "$BIN_SHELL" id 1
   [ "$status" -ne 0 ]
