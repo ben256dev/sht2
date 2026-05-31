@@ -29,7 +29,8 @@ var (
 	dbPath    = getenv("SHT_DB_PATH", "/var/lib/sht/sht.db")
 )
 
-const defaultUserMaxBytes int64 = 30 * 1024 * 1024 * 1024
+const defaultUserMaxBytes int64 = 3 * 1024 * 1024 * 1024
+const defaultUserMaxPendingBytes int64 = defaultUserMaxBytes + defaultUserMaxBytes/4
 
 func getenv(key, fallback string) string {
 	v := os.Getenv(key)
@@ -127,6 +128,15 @@ func userStorageBytes(db *sql.DB, userID int64) (int64, error) {
 	return size, nil
 }
 
+func userPendingBytes(db *sql.DB, userID int64) (int64, int64, error) {
+	var pendingBytes, maxPendingBytes int64
+	err := db.QueryRow("SELECT pending_bytes, max_pending_bytes FROM users WHERE id = ?", userID).Scan(&pendingBytes, &maxPendingBytes)
+	if err != nil {
+		return 0, 0, err
+	}
+	return pendingBytes, maxPendingBytes, nil
+}
+
 func userHasBlob(db *sql.DB, userID int64, digest string) (bool, error) {
 	var exists int
 	err := db.QueryRow("SELECT 1 FROM blob_refs WHERE user_id = ? AND digest = ?", userID, digest).Scan(&exists)
@@ -150,6 +160,18 @@ func addBlobRef(db *sql.DB, p Principal, digest string, size int64) error {
 	return err
 }
 
+func releaseBlobRef(db *sql.DB, userID int64, digest string) (bool, error) {
+	result, err := db.Exec("DELETE FROM blob_refs WHERE user_id = ? AND digest = ?", userID, digest)
+	if err != nil {
+		return false, err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func checkUserQuota(db *sql.DB, userID, uploadBytes int64) error {
 	maxBytes, err := userMaxBytes(db, userID)
 	if err != nil {
@@ -165,6 +187,23 @@ func checkUserQuota(db *sql.DB, userID, uploadBytes int64) error {
 		return fmt.Errorf("quota exceeded: used %d bytes, upload %d bytes, limit %d bytes", usedBytes, uploadBytes, maxBytes)
 	}
 	return nil
+}
+
+func checkUserPendingQuota(db *sql.DB, userID, uploadBytes int64) error {
+	pendingBytes, maxPendingBytes, err := userPendingBytes(db, userID)
+	if err != nil {
+		return err
+	}
+
+	if pendingBytes+uploadBytes > maxPendingBytes {
+		return fmt.Errorf("pending quota exceeded: pending %d bytes, upload %d bytes, limit %d bytes", pendingBytes, uploadBytes, maxPendingBytes)
+	}
+	return nil
+}
+
+func addPendingBytes(db *sql.DB, userID, uploadBytes int64) error {
+	_, err := db.Exec("UPDATE users SET pending_bytes = pending_bytes + ? WHERE id = ?", uploadBytes, userID)
+	return err
 }
 
 type StoreBlobResponse struct {
@@ -252,8 +291,17 @@ func handleBlobPost(db *sql.DB) http.HandlerFunc {
 		if _, err := os.Stat(final); err == nil {
 			os.Remove(tmpName)
 		} else if os.IsNotExist(err) {
+			if err := checkUserPendingQuota(db, p.UserID, n); err != nil {
+				http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+				return
+			}
+
 			if err := os.Rename(tmpName, final); err != nil {
 				http.Error(w, "rename failed", http.StatusInternalServerError)
+				return
+			}
+			if err := addPendingBytes(db, p.UserID, n); err != nil {
+				http.Error(w, "failed to add pending bytes", http.StatusInternalServerError)
 				return
 			}
 		} else {
@@ -277,8 +325,8 @@ func handleBlobPost(db *sql.DB) http.HandlerFunc {
 	}
 }
 
-func handleBlobGet(db *sql.DB, w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+func handleBlobPath(db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -299,6 +347,20 @@ func handleBlobGet(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 	}
 	if !exists {
 		http.Error(w, "blob not found", http.StatusNotFound)
+		return
+	}
+
+	if r.Method == http.MethodDelete {
+		released, err := releaseBlobRef(db, p.UserID, digest)
+		if err != nil {
+			http.Error(w, "failed to release blob", http.StatusInternalServerError)
+			return
+		}
+		if !released {
+			http.Error(w, "blob not found", http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -340,6 +402,8 @@ CREATE TABLE IF NOT EXISTS users (
 	name TEXT NOT NULL UNIQUE,
 	enabled INTEGER NOT NULL DEFAULT 1,
 	max_bytes INTEGER NOT NULL DEFAULT %d,
+	max_pending_bytes INTEGER NOT NULL DEFAULT %d,
+	pending_bytes INTEGER NOT NULL DEFAULT 0,
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -364,12 +428,18 @@ CREATE TABLE IF NOT EXISTS blob_refs (
 
 CREATE INDEX IF NOT EXISTS blob_refs_user_id ON blob_refs(user_id);
 CREATE INDEX IF NOT EXISTS blob_refs_digest ON blob_refs(digest);
-`, defaultUserMaxBytes))
+`, defaultUserMaxBytes, defaultUserMaxPendingBytes))
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	if err := ensureColumn(db, "users", "max_bytes", fmt.Sprintf("INTEGER NOT NULL DEFAULT %d", defaultUserMaxBytes)); err != nil {
+		log.Fatal(err)
+	}
+	if err := ensureColumn(db, "users", "max_pending_bytes", fmt.Sprintf("INTEGER NOT NULL DEFAULT %d", defaultUserMaxPendingBytes)); err != nil {
+		log.Fatal(err)
+	}
+	if err := ensureColumn(db, "users", "pending_bytes", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		log.Fatal(err)
 	}
 
@@ -489,7 +559,7 @@ func main() {
 	mux.HandleFunc("/blob", requirePrincipal(db, handleBlobPost(db)))
 
 	mux.HandleFunc("/blob/", requirePrincipal(db, func(w http.ResponseWriter, r *http.Request) {
-		handleBlobGet(db, w, r)
+		handleBlobPath(db, w, r)
 	}))
 
 	log.Println("Listening on ", path)

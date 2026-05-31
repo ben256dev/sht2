@@ -28,8 +28,9 @@ var (
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  sht               # upload stdin")
-	fmt.Fprintln(os.Stderr, "  sht cat  <digest> # print blob")
-	fmt.Fprintln(os.Stderr, "  sht stat <digest> # stat blob")
+	fmt.Fprintln(os.Stderr, "  sht cat     <digest> # print blob")
+	fmt.Fprintln(os.Stderr, "  sht stat    <digest> # stat blob")
+	fmt.Fprintln(os.Stderr, "  sht release <digest> # release blob")
 	fmt.Fprintln(os.Stderr, "  sht help          # show this message")
 }
 
@@ -143,6 +144,40 @@ func stat(digest string, keyID int64) {
 	fmt.Println("exists")
 }
 
+func release(digest string, keyID int64) {
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return net.Dial("unix", sockDir)
+			},
+		},
+	}
+
+	req, err := http.NewRequest(http.MethodDelete, "http://sht/blob/"+digest, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		if resp.StatusCode == http.StatusNotFound {
+			fmt.Fprintln(os.Stderr, "not found")
+			os.Exit(1)
+		}
+		fmt.Fprintln(os.Stderr, resp.Status)
+		os.Exit(1)
+	}
+
+	fmt.Println("released")
+}
+
 func commandArgs() []string {
 	return strings.Fields(os.Getenv("SSH_ORIGINAL_COMMAND"))
 }
@@ -184,6 +219,11 @@ func main() {
 			die("usage: sht cat <digest>")
 		}
 		cat(args[1], id)
+	case "release":
+		if len(args) != 2 {
+			die("usage: sht release <digest>")
+		}
+		release(args[1], id)
 	case "help", "-h", "--help":
 		usage()
 	default:

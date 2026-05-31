@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   enabled INTEGER NOT NULL DEFAULT 1,
-  max_bytes INTEGER NOT NULL DEFAULT 32212254720,
+  max_bytes INTEGER NOT NULL DEFAULT 3221225472,
+  max_pending_bytes INTEGER NOT NULL DEFAULT 4026531840,
+  pending_bytes INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS key_ids (
@@ -45,8 +47,8 @@ CREATE TABLE IF NOT EXISTS blob_refs (
 );
 CREATE INDEX IF NOT EXISTS blob_refs_user_id ON blob_refs(user_id);
 CREATE INDEX IF NOT EXISTS blob_refs_digest ON blob_refs(digest);
-INSERT OR REPLACE INTO users (id, name, enabled, max_bytes) VALUES (1, 'test-user-1', 1, 32212254720);
-INSERT OR REPLACE INTO users (id, name, enabled, max_bytes) VALUES (2, 'test-user-2', 1, 32212254720);
+INSERT OR REPLACE INTO users (id, name, enabled, max_bytes, max_pending_bytes, pending_bytes) VALUES (1, 'test-user-1', 1, 3221225472, 4026531840, 0);
+INSERT OR REPLACE INTO users (id, name, enabled, max_bytes, max_pending_bytes, pending_bytes) VALUES (2, 'test-user-2', 1, 3221225472, 4026531840, 0);
 INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (1, 1, 'test-key-1', 1);
 INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (2, 2, 'test-key-2', 1);
 INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (3, 1, 'test-key-3', 1);

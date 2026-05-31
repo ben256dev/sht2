@@ -49,6 +49,23 @@ teardown() {
   [ "$cat_payload" = "$payload" ]
 }
 
+@test "sht-shell release removes blob access" {
+  start_shtd
+
+  payload="shell release payload"
+  store_out="$(printf '%s' "$payload" | SSH_ORIGINAL_COMMAND=' ' "$BIN_SHELL" id 1)"
+  digest="$(printf '%s\n' "$store_out" | tail -n1)"
+
+  [ -n "$digest" ]
+
+  release_out="$(SSH_ORIGINAL_COMMAND="release $digest" "$BIN_SHELL" id 1)"
+  [ "$release_out" = "released" ]
+
+  run env SSH_ORIGINAL_COMMAND="stat $digest" "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not found"* ]]
+}
+
 @test "sht-shell rejects unknown command" {
   run env SSH_ORIGINAL_COMMAND='wat' "$BIN_SHELL" id 1
   [ "$status" -ne 0 ]
