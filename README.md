@@ -28,9 +28,9 @@ go test ./...
 
 The database contains `users`, `key_ids`, and `blob_refs`. Requests must include `X-SHT-Key-ID`, and the key ID must belong to an enabled key and enabled user.
 
-Blobs are stored globally by digest under `SHT_BLOB_DIR`, while `blob_refs` records which users can access each digest. Each user has a `max_bytes` live quota. New users default to `3221225472` bytes, which is 3 GiB. The daemon enforces this quota from the sum of that user's `blob_refs`. Uploading content that a user already references does not consume quota again; uploading content already stored by another user creates a new reference and counts against the new user's live quota.
+Blobs are stored globally by digest under `SHT_BLOB_DIR`, while `blob_refs` records which users can access each digest. Each user has a `max_bytes` live quota. New users default to `3221225472` bytes, which is 3 GiB. The daemon enforces this quota from the sum of that user's clean `blob_refs`. Uploading content that a user already cleanly references does not consume quota again; uploading content already stored by another user creates a new reference and counts against the new user's live quota.
 
-Users also have a per-GC-cycle pending quota. New users default to `4026531840` pending bytes, which is 1.25x the default live quota. Creating a new physical blob increments `users.pending_bytes`; referencing an already-stored global blob does not. Releasing a blob removes the user's `blob_refs` row and frees live quota, but it does not decrement pending bytes. A future GC pass should delete unreferenced physical blobs and reset `pending_bytes`; tests simulate that manually.
+Users also have a per-GC-cycle pending quota. New users default to `4026531840` pending bytes, which is 1.25x the default live quota. Creating a new physical blob increments `users.pending_bytes`; referencing an already-stored global blob does not. Releasing a blob marks the user's `blob_refs` row dirty and frees live quota, but it does not decrement pending bytes. Dirty refs are listed for visibility, cannot be fetched, and can be restored by uploading the same content again. A future GC pass should delete physical blobs with no clean refs, delete their dirty ref rows, and reset `pending_bytes`; tests simulate that manually.
 
 Older test blobs stored under per-key directories are not migrated into `blob_refs`. For a clean test/dev reset, stop `shtd`, delete `SHT_BLOB_DIR`, recreate it with the daemon user's ownership, and restart the daemon.
 
@@ -75,8 +75,9 @@ Supported SSH commands:
 
 ```bash
 sht               # upload stdin
-sht cat <digest>      # print blob
-sht stat <digest>     # check blob exists
-sht release <digest>  # release blob access
+sht cat [<digest> ...]      # print blobs; reads whitespace-delimited digests from stdin when none are given
+sht stat [<digest> ...]     # check blobs; reads whitespace-delimited digests from stdin when none are given
+sht release [<digest> ...]  # release blob access; reads whitespace-delimited digests from stdin when none are given
+sht list [-dskcta] # list refs; d=digest, s=size, k=key_id, c=created_at, t=state, a=all
 sht help          # show usage
 ```

@@ -121,7 +121,7 @@ func userMaxBytes(db *sql.DB, userID int64) (int64, error) {
 
 func userStorageBytes(db *sql.DB, userID int64) (int64, error) {
 	var size int64
-	err := db.QueryRow("SELECT COALESCE(SUM(size), 0) FROM blob_refs WHERE user_id = ?", userID).Scan(&size)
+	err := db.QueryRow("SELECT COALESCE(SUM(size), 0) FROM blob_refs WHERE user_id = ? AND dirty = 0", userID).Scan(&size)
 	if err != nil {
 		return 0, err
 	}
@@ -137,9 +137,21 @@ func userPendingBytes(db *sql.DB, userID int64) (int64, int64, error) {
 	return pendingBytes, maxPendingBytes, nil
 }
 
-func userHasBlob(db *sql.DB, userID int64, digest string) (bool, error) {
+func userBlobRefState(db *sql.DB, userID int64, digest string) (bool, bool, error) {
+	var dirty int
+	err := db.QueryRow("SELECT dirty FROM blob_refs WHERE user_id = ? AND digest = ?", userID, digest).Scan(&dirty)
+	if err == sql.ErrNoRows {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	return true, dirty != 0, nil
+}
+
+func userHasCleanBlob(db *sql.DB, userID int64, digest string) (bool, error) {
 	var exists int
-	err := db.QueryRow("SELECT 1 FROM blob_refs WHERE user_id = ? AND digest = ?", userID, digest).Scan(&exists)
+	err := db.QueryRow("SELECT 1 FROM blob_refs WHERE user_id = ? AND digest = ? AND dirty = 0", userID, digest).Scan(&exists)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
@@ -160,8 +172,19 @@ func addBlobRef(db *sql.DB, p Principal, digest string, size int64) error {
 	return err
 }
 
+func restoreBlobRef(db *sql.DB, p Principal, digest string, size int64) error {
+	_, err := db.Exec(
+		"UPDATE blob_refs SET key_id = ?, size = ?, dirty = 0, created_at = CURRENT_TIMESTAMP WHERE user_id = ? AND digest = ?",
+		p.KeyID,
+		size,
+		p.UserID,
+		digest,
+	)
+	return err
+}
+
 func releaseBlobRef(db *sql.DB, userID int64, digest string) (bool, error) {
-	result, err := db.Exec("DELETE FROM blob_refs WHERE user_id = ? AND digest = ?", userID, digest)
+	result, err := db.Exec("UPDATE blob_refs SET dirty = 1 WHERE user_id = ? AND digest = ? AND dirty = 0", userID, digest)
 	if err != nil {
 		return false, err
 	}
@@ -210,6 +233,43 @@ type StoreBlobResponse struct {
 	Digest string `json:"digest"`
 	Size   int64  `json:"size"`
 	Exists bool   `json:"exists"`
+}
+
+type BlobRef struct {
+	Digest    string `json:"digest"`
+	Size      int64  `json:"size"`
+	KeyID     int64  `json:"key_id"`
+	CreatedAt string `json:"created_at"`
+	Dirty     bool   `json:"dirty"`
+}
+
+type ListRefsResponse struct {
+	Refs []BlobRef `json:"refs"`
+}
+
+func userBlobRefs(db *sql.DB, userID int64) ([]BlobRef, error) {
+	rows, err := db.Query(`
+		SELECT digest, size, key_id, created_at, dirty
+		FROM blob_refs
+		WHERE user_id = ?
+		ORDER BY created_at DESC, digest ASC
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var refs []BlobRef
+	for rows.Next() {
+		var ref BlobRef
+		var dirty int
+		if err := rows.Scan(&ref.Digest, &ref.Size, &ref.KeyID, &ref.CreatedAt, &dirty); err != nil {
+			return nil, err
+		}
+		ref.Dirty = dirty != 0
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
 }
 
 func handleBlobPost(db *sql.DB) http.HandlerFunc {
@@ -265,12 +325,12 @@ func handleBlobPost(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		exists, err := userHasBlob(db, p.UserID, digest)
+		refExists, refDirty, err := userBlobRefState(db, p.UserID, digest)
 		if err != nil {
 			http.Error(w, "failed to check blob ref", http.StatusInternalServerError)
 			return
 		}
-		if exists {
+		if refExists && !refDirty {
 			ok = true
 			os.Remove(tmpName)
 
@@ -309,9 +369,16 @@ func handleBlobPost(db *sql.DB) http.HandlerFunc {
 			return
 		}
 
-		if err := addBlobRef(db, p, digest, n); err != nil {
-			http.Error(w, "failed to add blob ref", http.StatusInternalServerError)
-			return
+		if refExists {
+			if err := restoreBlobRef(db, p, digest, n); err != nil {
+				http.Error(w, "failed to restore blob ref", http.StatusInternalServerError)
+				return
+			}
+		} else {
+			if err := addBlobRef(db, p, digest, n); err != nil {
+				http.Error(w, "failed to add blob ref", http.StatusInternalServerError)
+				return
+			}
 		}
 
 		ok = true
@@ -323,6 +390,26 @@ func handleBlobPost(db *sql.DB) http.HandlerFunc {
 			Exists: false,
 		})
 	}
+}
+
+func handleRefsGet(db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	p := getPrincipal(r)
+	refs, err := userBlobRefs(db, p.UserID)
+	if err != nil {
+		http.Error(w, "failed to list refs", http.StatusInternalServerError)
+		return
+	}
+	if refs == nil {
+		refs = []BlobRef{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(ListRefsResponse{Refs: refs})
 }
 
 func handleBlobPath(db *sql.DB, w http.ResponseWriter, r *http.Request) {
@@ -340,7 +427,7 @@ func handleBlobPath(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	exists, err := userHasBlob(db, p.UserID, digest)
+	exists, err := userHasCleanBlob(db, p.UserID, digest)
 	if err != nil {
 		http.Error(w, "failed to check blob ref", http.StatusInternalServerError)
 		return
@@ -421,6 +508,7 @@ CREATE TABLE IF NOT EXISTS blob_refs (
 	digest TEXT NOT NULL,
 	size INTEGER NOT NULL,
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	dirty INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (user_id, digest),
 	FOREIGN KEY(user_id) REFERENCES users(id),
 	FOREIGN KEY(key_id) REFERENCES key_ids(id)
@@ -440,6 +528,9 @@ CREATE INDEX IF NOT EXISTS blob_refs_digest ON blob_refs(digest);
 		log.Fatal(err)
 	}
 	if err := ensureColumn(db, "users", "pending_bytes", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		log.Fatal(err)
+	}
+	if err := ensureColumn(db, "blob_refs", "dirty", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		log.Fatal(err)
 	}
 
@@ -557,6 +648,10 @@ func main() {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/blob", requirePrincipal(db, handleBlobPost(db)))
+
+	mux.HandleFunc("/refs", requirePrincipal(db, func(w http.ResponseWriter, r *http.Request) {
+		handleRefsGet(db, w, r)
+	}))
 
 	mux.HandleFunc("/blob/", requirePrincipal(db, func(w http.ResponseWriter, r *http.Request) {
 		handleBlobPath(db, w, r)

@@ -71,3 +71,56 @@ teardown() {
   [ "$ref_count" = "2" ]
   [ "$file_count" = "1" ]
 }
+
+@test "shtd lists refs for authenticated user only" {
+  r1="$(printf 'first' | curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X POST http://sht/blob --data-binary @-)"
+  r2="$(printf 'second' | curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X POST http://sht/blob --data-binary @-)"
+  r_other="$(printf 'other' | curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 2' -X POST http://sht/blob --data-binary @-)"
+  d1="$(printf '%s' "$r1" | sed -n 's/.*"digest":"\([^"]*\)".*/\1/p')"
+  d2="$(printf '%s' "$r2" | sed -n 's/.*"digest":"\([^"]*\)".*/\1/p')"
+  d_other="$(printf '%s' "$r_other" | sed -n 's/.*"digest":"\([^"]*\)".*/\1/p')"
+
+  refs="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/refs)"
+
+  [[ "$refs" == *"$d1"* ]]
+  [[ "$refs" == *"$d2"* ]]
+  [[ "$refs" != *"$d_other"* ]]
+  [[ "$refs" == *'"size":5'* ]]
+  [[ "$refs" == *'"size":6'* ]]
+  [[ "$refs" == *'"key_id":1'* ]]
+  [[ "$refs" == *'"dirty":false'* ]]
+}
+
+@test "shtd released refs stay listed as dirty and lose access" {
+  resp="$(printf 'gone' | curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X POST http://sht/blob --data-binary @-)"
+  digest="$(printf '%s' "$resp" | sed -n 's/.*"digest":"\([^"]*\)".*/\1/p')"
+
+  [ -n "$digest" ]
+
+  curl -sS -o /dev/null --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X DELETE "http://sht/blob/$digest"
+  refs="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/refs)"
+  code="$(curl -sS -o /dev/null -w "%{http_code}" --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' "http://sht/blob/$digest")"
+
+  [[ "$refs" == *"$digest"* ]]
+  [[ "$refs" == *'"dirty":true'* ]]
+  [ "$code" = "404" ]
+}
+
+@test "shtd reupload restores dirty ref" {
+  payload="restore me"
+  resp="$(printf '%s' "$payload" | curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X POST http://sht/blob --data-binary @-)"
+  digest="$(printf '%s' "$resp" | sed -n 's/.*"digest":"\([^"]*\)".*/\1/p')"
+
+  [ -n "$digest" ]
+
+  curl -sS -o /dev/null --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X DELETE "http://sht/blob/$digest"
+
+  resp2="$(printf '%s' "$payload" | curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X POST http://sht/blob --data-binary @-)"
+  body="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' "http://sht/blob/$digest")"
+  refs="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/refs)"
+
+  [[ "$resp2" == *'"exists":false'* ]]
+  [ "$body" = "$payload" ]
+  [[ "$refs" == *"$digest"* ]]
+  [[ "$refs" == *'"dirty":false'* ]]
+}

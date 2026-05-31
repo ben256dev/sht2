@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS blob_refs (
   digest TEXT NOT NULL,
   size INTEGER NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  dirty INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (user_id, digest),
   FOREIGN KEY(user_id) REFERENCES users(id),
   FOREIGN KEY(key_id) REFERENCES key_ids(id)

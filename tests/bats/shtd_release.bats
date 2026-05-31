@@ -40,6 +40,35 @@ pending_bytes() {
   sqlite3 "$SHT_DB_PATH" "SELECT pending_bytes FROM users WHERE id = $1"
 }
 
+blob_file() {
+  local digest="$1"
+  if [ "${#digest}" -lt 3 ]; then
+    printf '%s/%s\n' "$SHT_BLOB_DIR" "$digest"
+    return
+  fi
+  printf '%s/%s/%s\n' "$SHT_BLOB_DIR" "${digest:0:2}" "${digest:2}"
+}
+
+manual_gc() {
+  local digest
+  while IFS= read -r digest; do
+    [ -n "$digest" ] || continue
+    rm -f "$(blob_file "$digest")"
+  done < <(sqlite3 "$SHT_DB_PATH" "
+    SELECT DISTINCT dirty_refs.digest
+    FROM blob_refs AS dirty_refs
+    WHERE dirty_refs.dirty = 1
+      AND NOT EXISTS (
+        SELECT 1
+        FROM blob_refs AS clean_refs
+        WHERE clean_refs.digest = dirty_refs.digest
+          AND clean_refs.dirty = 0
+      );
+  ")
+
+  sqlite3 "$SHT_DB_PATH" "DELETE FROM blob_refs WHERE dirty = 1; UPDATE users SET pending_bytes = 0"
+}
+
 @test "shtd release removes user access" {
   start_shtd
 
@@ -84,10 +113,50 @@ pending_bytes() {
   [ "$(release_code 1 "$digest")" = "204" ]
   [ "$(upload_code 1 'd')" = "413" ]
 
-  find "$SHT_BLOB_DIR" -type f -delete
-  sqlite3 "$SHT_DB_PATH" "UPDATE users SET pending_bytes = 0"
+  manual_gc
 
   [ "$(upload_code 1 'd')" = "200" ]
+}
+
+@test "shtd manual gc removes dirty refs" {
+  set_limits 1 20 3
+  start_shtd
+
+  digest="$(upload 1 'abc' | digest_from_response)"
+  [ -n "$digest" ]
+  [ "$(release_code 1 "$digest")" = "204" ]
+
+  refs="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/refs)"
+  [[ "$refs" == *"$digest"* ]]
+  [[ "$refs" == *'"dirty":true'* ]]
+
+  manual_gc
+
+  refs="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/refs)"
+  [[ "$refs" != *"$digest"* ]]
+
+  [ ! -e "$(blob_file "$digest")" ]
+}
+
+@test "shtd manual gc preserves blobs still referenced by another user" {
+  set_limits 1 20 10
+  set_limits 2 20 10
+  start_shtd
+
+  payload="shared"
+  digest="$(upload 1 "$payload" | digest_from_response)"
+  [ -n "$digest" ]
+  [ "$(upload_code 2 "$payload")" = "200" ]
+  [ "$(release_code 1 "$digest")" = "204" ]
+
+  manual_gc
+
+  refs_user1="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/refs)"
+  body_user2="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 2' "http://sht/blob/$digest")"
+
+  [[ "$refs_user1" != *"$digest"* ]]
+  [ "$body_user2" = "$payload" ]
+  [ -e "$(blob_file "$digest")" ]
 }
 
 @test "shtd existing global blob does not charge pending quota" {
