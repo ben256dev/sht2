@@ -27,16 +27,25 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"usage:"* ]]
   [[ "$output" == *"sht cat     [<digest> ...]"* ]]
-  [[ "$output" == *"sht list [-dskcta]"* ]]
+  [[ "$output" == *"sht list [-dhskcta]"* ]]
+  [[ "$output" == *"sht quota"* ]]
 }
 
 @test "sht-shell list help prints command usage" {
   run env SSH_ORIGINAL_COMMAND='list -h' "$BIN_SHELL" id 1
   [ "$status" -eq 0 ]
-  [[ "$output" == *"sht list [-dskcta]"* ]]
+  [[ "$output" == *"sht list [-dhskcta]"* ]]
   [[ "$output" == *"-d  digest"* ]]
+  [[ "$output" == *"-h  shelf"* ]]
   [[ "$output" == *"-t  state"* ]]
-  [[ "$output" == *"sht list -dt"* ]]
+  [[ "$output" == *"sht list -dht"* ]]
+}
+
+@test "sht-shell scoped list help prints command usage" {
+  run env SSH_ORIGINAL_COMMAND='app1 list -h' "$BIN_SHELL" id 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sht list [-dhskcta]"* ]]
+  [[ "$output" == *"sht <shelf> list -dt"* ]]
 }
 
 @test "sht-shell digest command help prints command usage" {
@@ -44,6 +53,13 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"sht release [<digest> ...]"* ]]
   [[ "$output" == *"digests are read from stdin"* ]]
+}
+
+@test "sht-shell shelf help prints command usage" {
+  run env SSH_ORIGINAL_COMMAND='shelf -h' "$BIN_SHELL" id 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sht shelf list"* ]]
+  [[ "$output" == *"sht shelf set-default <name>"* ]]
 }
 
 @test "sht-shell stat on missing blob returns not found" {
@@ -135,7 +151,7 @@ teardown() {
   [ -n "$digest" ]
 
   refs_out="$(SSH_ORIGINAL_COMMAND='list' "$BIN_SHELL" id 1)"
-  [[ "$refs_out" == *"$digest 18 1 "* ]]
+  [[ "$refs_out" == *"$digest  default  18  1"* ]]
 }
 
 @test "sht-shell list can print selected fields" {
@@ -151,12 +167,47 @@ teardown() {
   [[ "$refs_out" != *" 3 1 "* ]]
 
   refs_out="$(SSH_ORIGINAL_COMMAND='list -ds' "$BIN_SHELL" id 1)"
-  [[ "$refs_out" == *"$d1 3"* ]]
-  [[ "$refs_out" == *"$d2 3"* ]]
+  [[ "$refs_out" == *"$d1  3"* ]]
+  [[ "$refs_out" == *"$d2  3"* ]]
 
   refs_out="$(SSH_ORIGINAL_COMMAND='list -dt' "$BIN_SHELL" id 1)"
-  [[ "$refs_out" == *"$d1 clean"* ]]
-  [[ "$refs_out" == *"$d2 clean"* ]]
+  [[ "$refs_out" == *"$d1  clean"* ]]
+  [[ "$refs_out" == *"$d2  clean"* ]]
+
+  refs_out="$(SSH_ORIGINAL_COMMAND='list -dht' "$BIN_SHELL" id 1)"
+  [[ "$refs_out" == *"$d1  default  clean"* ]]
+  [[ "$refs_out" == *"$d2  default  clean"* ]]
+}
+
+@test "sht-shell list pads columns" {
+  start_shtd
+
+  d2="$(printf 'other' | SSH_ORIGINAL_COMMAND=' ' "$BIN_SHELL" id 1 | tail -n1)"
+  SSH_ORIGINAL_COMMAND='shelf create shelf1 20 20' "$BIN_SHELL" id 1 >/dev/null
+  d1="$(printf 'same' | SSH_ORIGINAL_COMMAND='shelf1' "$BIN_SHELL" id 1 | tail -n1)"
+
+  refs_out="$(SSH_ORIGINAL_COMMAND='list -dht' "$BIN_SHELL" id 1)"
+
+  [[ "$refs_out" == *"$d1  shelf1   clean"* ]]
+  [[ "$refs_out" == *"$d2  default  clean"* ]]
+}
+
+@test "sht-shell quota shows total user usage" {
+  start_shtd
+
+  printf 'abc' | SSH_ORIGINAL_COMMAND=' ' "$BIN_SHELL" id 1 >/dev/null
+
+  quota_out="$(SSH_ORIGINAL_COMMAND='quota' "$BIN_SHELL" id 1)"
+  [[ "$quota_out" == *"live      3/3221225472"* ]]
+  [[ "$quota_out" == *"pending   3/4026531840"* ]]
+  [[ "$quota_out" == *"reserved  0"* ]]
+  [[ "$quota_out" == *"clean     1"* ]]
+}
+
+@test "sht-shell quota rejects extra arguments" {
+  run env SSH_ORIGINAL_COMMAND='quota bogus' "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"usage: sht quota"* ]]
 }
 
 @test "sht-shell list shows released refs as dirty" {
@@ -169,7 +220,7 @@ teardown() {
   [ "$release_out" = "released" ]
 
   refs_out="$(SSH_ORIGINAL_COMMAND='list -dt' "$BIN_SHELL" id 1)"
-  [[ "$refs_out" == *"$digest dirty"* ]]
+  [[ "$refs_out" == *"$digest  dirty"* ]]
 
   run env SSH_ORIGINAL_COMMAND="cat $digest" "$BIN_SHELL" id 1
   [ "$status" -ne 0 ]
@@ -185,10 +236,10 @@ teardown() {
   status="$(printf '%s' "$manifest" | SSH_ORIGINAL_COMMAND='manifest' "$BIN_SHELL" id 1)"
   [[ "$status" == *'"missing":[0]'* ]]
 
-  chunk_out="$(printf 'hello world' | SSH_ORIGINAL_COMMAND="upload-chunk $digest 0" "$BIN_SHELL" id 1)"
+  chunk_out="$(printf 'hello world' | SSH_ORIGINAL_COMMAND="upload $digest 0" "$BIN_SHELL" id 1)"
   [[ "$chunk_out" == *'"index":0'* ]]
 
-  status="$(SSH_ORIGINAL_COMMAND="upload-status $digest" "$BIN_SHELL" id 1)"
+  status="$(SSH_ORIGINAL_COMMAND="status $digest" "$BIN_SHELL" id 1)"
   [[ "$status" == *'"missing":[]'* ]]
   [[ "$status" == *'"complete":true'* ]]
 
@@ -199,8 +250,153 @@ teardown() {
   [ "$cat_out" = "hello world" ]
 }
 
-@test "sht-shell rejects unknown command" {
-  run env SSH_ORIGINAL_COMMAND='wat' "$BIN_SHELL" id 1
+@test "sht-shell shelf commands enable scoped uploads and lists" {
+  start_shtd
+
+  shelves="$(SSH_ORIGINAL_COMMAND='shelf list' "$BIN_SHELL" id 1)"
+  [[ "$shelves" == *"default  0/3221225472  0/4026531840  0  enabled  default"* ]]
+
+  created="$(SSH_ORIGINAL_COMMAND='shelf create app1 3 10' "$BIN_SHELL" id 1)"
+  [ "$created" = "app1 3 10 enabled" ]
+
+  run bash -c "printf abc | SSH_ORIGINAL_COMMAND=' ' \"$BIN_SHELL\" id 1"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unknown command"* ]]
+  [[ "$output" == *"shelf required"* ]]
+  [[ "$output" == *"sht shelf list"* ]]
+  [[ "$output" == *"sht <shelf> <command>"* ]]
+
+  digest="$(printf 'abc' | SSH_ORIGINAL_COMMAND='app1' "$BIN_SHELL" id 1 | tail -n1)"
+  [ -n "$digest" ]
+
+  duplicate="$(printf 'abc' | SSH_ORIGINAL_COMMAND=' ' "$BIN_SHELL" id 1 | tail -n1)"
+  [ "$duplicate" = "$digest" ]
+
+  refs_out="$(SSH_ORIGINAL_COMMAND='app1 list -dt' "$BIN_SHELL" id 1)"
+  [[ "$refs_out" == *"$digest  clean"* ]]
+
+  refs_out="$(SSH_ORIGINAL_COMMAND='list -dht' "$BIN_SHELL" id 1)"
+  [[ "$refs_out" == *"$digest  app1  clean"* ]]
+
+  shelves="$(SSH_ORIGINAL_COMMAND='shelf list' "$BIN_SHELL" id 1)"
+  [[ "$shelves" == *"app1"* ]]
+  [[ "$shelves" == *"3/3"* ]]
+  [[ "$shelves" == *"3/10"* ]]
+  [[ "$shelves" == *"1  enabled"* ]]
+
+  SSH_ORIGINAL_COMMAND="cat $digest" "$BIN_SHELL" id 1 >"$TEST_TMPDIR/cat.out"
+  cmp <(printf 'abc\n') "$TEST_TMPDIR/cat.out"
+}
+
+@test "sht-shell scoped release only releases from the named shelf" {
+  start_shtd
+
+  SSH_ORIGINAL_COMMAND='shelf create a 20 20' "$BIN_SHELL" id 1 >/dev/null
+  SSH_ORIGINAL_COMMAND='shelf create b 20 20' "$BIN_SHELL" id 1 >/dev/null
+
+  digest="$(printf 'shared' | SSH_ORIGINAL_COMMAND='a' "$BIN_SHELL" id 1 | tail -n1)"
+  [ -n "$digest" ]
+  printf 'shared' | SSH_ORIGINAL_COMMAND='b' "$BIN_SHELL" id 1 >/dev/null
+
+  release_out="$(SSH_ORIGINAL_COMMAND="a release $digest" "$BIN_SHELL" id 1)"
+  [ "$release_out" = "released" ]
+
+  refs_a="$(SSH_ORIGINAL_COMMAND='a list -dt' "$BIN_SHELL" id 1)"
+  refs_b="$(SSH_ORIGINAL_COMMAND='b list -dt' "$BIN_SHELL" id 1)"
+  [[ "$refs_a" == *"$digest  dirty"* ]]
+  [[ "$refs_b" == *"$digest  clean"* ]]
+
+  cat_out="$(SSH_ORIGINAL_COMMAND="cat $digest" "$BIN_SHELL" id 1)"
+  [ "$cat_out" = "shared" ]
+}
+
+@test "sht-shell shelf delete requires force and removes shelf" {
+  start_shtd
+
+  SSH_ORIGINAL_COMMAND='shelf create doomed 20 20' "$BIN_SHELL" id 1 >/dev/null
+  digest="$(printf 'payload' | SSH_ORIGINAL_COMMAND='doomed' "$BIN_SHELL" id 1 | tail -n1)"
+  [ -n "$digest" ]
+
+  run env SSH_ORIGINAL_COMMAND='shelf delete doomed' "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"usage: sht shelf delete <name> --force"* ]]
+
+  run env SSH_ORIGINAL_COMMAND='shelf delete default --force' "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot delete default shelf"* ]]
+
+  deleted="$(SSH_ORIGINAL_COMMAND='shelf delete doomed -f' "$BIN_SHELL" id 1)"
+  [ "$deleted" = "deleted" ]
+
+  shelves="$(SSH_ORIGINAL_COMMAND='shelf list' "$BIN_SHELL" id 1)"
+  [[ "$shelves" != *"doomed"* ]]
+
+  run env SSH_ORIGINAL_COMMAND='doomed list -dt' "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"shelf not found"* ]]
+  [[ "$output" == *"sht shelf list"* ]]
+  [[ "$output" == *"sht shelf create doomed <max_bytes> <max_pending_bytes>"* ]]
+
+  run env SSH_ORIGINAL_COMMAND="cat $digest" "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not found"* ]]
+}
+
+@test "sht-shell can rename shelves and set default" {
+  start_shtd
+
+  renamed="$(SSH_ORIGINAL_COMMAND='shelf rename default main' "$BIN_SHELL" id 1)"
+  [[ "$renamed" == *"main 3221225472 4026531840 enabled default"* ]]
+
+  digest="$(printf 'plain' | SSH_ORIGINAL_COMMAND=' ' "$BIN_SHELL" id 1 | tail -n1)"
+  [ -n "$digest" ]
+
+  SSH_ORIGINAL_COMMAND='shelf create app1 20 20' "$BIN_SHELL" id 1 >/dev/null
+  scoped="$(printf 'scoped' | SSH_ORIGINAL_COMMAND='app1' "$BIN_SHELL" id 1 | tail -n1)"
+  [ -n "$scoped" ]
+
+  changed="$(SSH_ORIGINAL_COMMAND='shelf set-default app1' "$BIN_SHELL" id 1)"
+  [ "$changed" = "app1 default" ]
+
+  shelves="$(SSH_ORIGINAL_COMMAND='shelf list' "$BIN_SHELL" id 1)"
+  [[ "$shelves" == *"app1"* ]]
+  [[ "$shelves" == *"6/20"* ]]
+  [[ "$shelves" == *"1  enabled  default"* ]]
+  [[ "$shelves" == *"main"* ]]
+  [[ "$shelves" == *"5/3221225472"* ]]
+  [[ "$shelves" == *"5/4026531840"* ]]
+
+  run env SSH_ORIGINAL_COMMAND='shelf delete app1 --force' "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot delete default shelf"* ]]
+
+  run env SSH_ORIGINAL_COMMAND='shelf rename main app1' "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"shelf already exists"* ]]
+}
+
+@test "sht-shell can recreate default name after default role moves" {
+  start_shtd
+
+  SSH_ORIGINAL_COMMAND='shelf create app1 20 20' "$BIN_SHELL" id 1 >/dev/null
+  SSH_ORIGINAL_COMMAND='shelf set-default app1' "$BIN_SHELL" id 1 >/dev/null
+  SSH_ORIGINAL_COMMAND='shelf delete default --force' "$BIN_SHELL" id 1 >/dev/null
+
+  created="$(SSH_ORIGINAL_COMMAND='shelf create default 20 20' "$BIN_SHELL" id 1)"
+  [ "$created" = "default 20 20 enabled" ]
+}
+
+@test "sht-shell top-level shelf admin verbs point to shelf usage" {
+  run env SSH_ORIGINAL_COMMAND='set-default app1' "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"usage: sht shelf set-default"* ]]
+
+  run env SSH_ORIGINAL_COMMAND='set-default' "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"usage: sht shelf set-default"* ]]
+}
+
+@test "sht-shell rejects unknown command" {
+  run env SSH_ORIGINAL_COMMAND='wat nope' "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unknown scoped command"* ]]
 }

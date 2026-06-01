@@ -117,7 +117,7 @@ manual_gc() {
         )
     );
   "
-  sqlite3 "$SHT_DB_PATH" "DELETE FROM blob_refs WHERE dirty = 1; UPDATE users SET pending_bytes = 0"
+  sqlite3 "$SHT_DB_PATH" "DELETE FROM blob_refs WHERE dirty = 1; UPDATE users SET pending_bytes = 0; UPDATE shelves SET pending_bytes = 0"
 }
 
 @test "shtd release removes user access" {
@@ -138,7 +138,17 @@ manual_gc() {
 
   digest="$(upload 1 'abc' | digest_from_response)"
   [ -n "$digest" ]
+
+  quota="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/quota)"
+  [[ "$quota" == *'"used_bytes":3'* ]]
+  [[ "$quota" == *'"pending_bytes":3'* ]]
+
   [ "$(release_code 1 "$digest")" = "204" ]
+
+  quota="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/quota)"
+  [[ "$quota" == *'"used_bytes":0'* ]]
+  [[ "$quota" == *'"pending_bytes":3'* ]]
+
   [ "$(upload_code 1 'def')" = "200" ]
   [ "$(pending_bytes 1)" = "6" ]
 }

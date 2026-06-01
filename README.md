@@ -26,13 +26,17 @@ go test ./...
 - `SHT_TMP_DIR`: temporary upload directory. Defaults to `/var/lib/sht/tmp`.
 - `SHT_DB_PATH`: SQLite database path. Defaults to `/var/lib/sht/sht.db`.
 
-The database contains `users`, `key_ids`, and `blob_refs`. Requests must include `X-SHT-Key-ID`, and the key ID must belong to an enabled key and enabled user.
+The database contains `users`, `key_ids`, `shelves`, and `blob_refs`. Requests must include `X-SHT-Key-ID`, and the key ID must belong to an enabled key and enabled user.
 
 Blobs are addressed by the BLAKE3 digest of the whole file. Physical storage is chunked under `SHT_BLOB_DIR/chunks`, and `blob_manifests` records which ordered chunk digests make up each final blob digest. `blob_refs` records which users can access each final blob digest. Each user has a `max_bytes` live quota. New users default to `3221225472` bytes, which is 3 GiB. The daemon enforces this quota from the sum of that user's clean `blob_refs`. Uploading content that a user already cleanly references does not consume quota again; uploading content already stored by another user creates a new reference and counts against the new user's live quota.
 
-Users also have a per-GC-cycle pending quota. New users default to `4026531840` pending bytes, which is 1.25x the default live quota. Creating new physical chunks increments `users.pending_bytes`; referencing already-stored global chunks does not. Releasing a blob marks the user's `blob_refs` row dirty and frees live quota, but it does not decrement pending bytes. Dirty refs are listed for visibility, cannot be fetched, and can be restored by uploading the same content again. A future GC pass should delete physical chunks with no clean refs, delete their dirty ref rows, and reset `pending_bytes`; tests simulate that manually.
+Users also have a per-GC-cycle pending quota. New users default to `4026531840` pending bytes, which is 1.25x the default live quota. Creating new physical chunks increments `users.pending_bytes`; referencing already-stored global chunks does not. Releasing a blob marks the user's `blob_refs` row dirty and frees live quota, but it does not decrement pending bytes. Dirty refs are listed for visibility, cannot be fetched, and can be restored by uploading the same content again. A future GC pass should delete physical chunks with no clean refs, delete their dirty ref rows, and reset `pending_bytes` on users and shelves; tests simulate that manually.
+
+Every user starts with a default shelf initially named `default`. The default shelf is a role, so it can be renamed or moved to another shelf. A shelf is a per-user quota partition for app-level ownership. Creating any non-default shelf enables multi-shelf mode for that user. After that, scoped operations must name a shelf with `X-SHT-Shelf`; unscoped `GET /blob/<digest>` and `HEAD /blob/<digest>` still succeed if the user has any clean shelf ref for the digest. User live quota counts each clean digest once across all shelves, while shelf live quota counts refs inside that shelf. Shelf pending quota is enforced independently for new physical bytes created through that shelf.
 
 Simple `POST /blob` uploads remain supported, but each user has a `max_simple_upload_bytes` cutoff. New users default to `67108864` bytes, which is 64 MiB. Larger uploads should use the resumable manifest workflow: `POST /uploads`, `PUT /uploads/<digest>/chunks/<index>`, `GET /uploads/<digest>`, and `POST /uploads/<digest>/finalize`.
+
+`GET /quota` returns total user quota usage: live bytes, pending bytes, bytes reserved by open upload sessions, and clean digest count. Shelf management uses `GET /shelves` and `POST /shelves` with JSON like `{"name":"app1","max_bytes":3221225472,"max_pending_bytes":4026531840}`. Shelf responses include `used_bytes`, `pending_bytes`, and `ref_count` for quota visibility. `PATCH /shelves/<name>` with `{"name":"new-name"}` renames a shelf, and `POST /shelves/<name>/default` makes a shelf the default. `DELETE /shelves/<name>?force=1` hard-deletes a non-default shelf's refs, upload sessions, and shelf row; physical blobs are left for GC.
 
 Older test blobs stored under per-key directories are not migrated into `blob_refs`. For a clean test/dev reset, stop `shtd`, delete `SHT_BLOB_DIR`, recreate it with the daemon user's ownership, and restart the daemon.
 
@@ -80,10 +84,22 @@ sht               # upload stdin
 sht cat [<digest> ...]      # print blobs; reads whitespace-delimited digests from stdin when none are given
 sht stat [<digest> ...]     # check blobs; reads whitespace-delimited digests from stdin when none are given
 sht release [<digest> ...]  # release blob access; reads whitespace-delimited digests from stdin when none are given
-sht list [-dskcta] # list refs; d=digest, s=size, k=key_id, c=created_at, t=state, a=all
+sht list [-dhskcta] # list refs from all shelves; d=digest, h=shelf, s=size, k=key_id, c=created_at, t=state, a=all
+sht shelf list
+sht shelf create <name> <max_bytes> <max_pending_bytes>
+sht shelf rename <old> <new>
+sht shelf set-default <name>
+sht shelf delete <name> --force
+sht <shelf>                # upload stdin to a shelf
+sht <shelf> list [-dhskcta]
+sht <shelf> release [<digest> ...]
+sht <shelf> manifest < manifest.json
+sht <shelf> upload <digest> <index> < chunk.bin
+sht <shelf> status <digest>
+sht <shelf> finalize <digest>
 sht manifest < manifest.json
-sht upload-chunk <digest> <index> < chunk.bin
-sht upload-status <digest>
+sht upload <digest> <index> < chunk.bin
+sht status <digest>
 sht finalize <digest>
 sht help          # show usage
 ```

@@ -26,7 +26,21 @@ CREATE TABLE IF NOT EXISTS users (
   max_pending_bytes INTEGER NOT NULL DEFAULT 4026531840,
   pending_bytes INTEGER NOT NULL DEFAULT 0,
   max_simple_upload_bytes INTEGER NOT NULL DEFAULT 67108864,
+  multi_shelf_enabled INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS shelves (
+  id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  max_bytes INTEGER NOT NULL,
+  max_pending_bytes INTEGER NOT NULL,
+  pending_bytes INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(user_id, name),
+  FOREIGN KEY(user_id) REFERENCES users(id)
 );
 CREATE TABLE IF NOT EXISTS key_ids (
   id INTEGER PRIMARY KEY,
@@ -38,13 +52,15 @@ CREATE TABLE IF NOT EXISTS key_ids (
 );
 CREATE TABLE IF NOT EXISTS blob_refs (
   user_id INTEGER NOT NULL,
+  shelf_id INTEGER NOT NULL,
   key_id INTEGER NOT NULL,
   digest TEXT NOT NULL,
   size INTEGER NOT NULL,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   dirty INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (user_id, digest),
+  PRIMARY KEY (user_id, shelf_id, digest),
   FOREIGN KEY(user_id) REFERENCES users(id),
+  FOREIGN KEY(shelf_id) REFERENCES shelves(id),
   FOREIGN KEY(key_id) REFERENCES key_ids(id)
 );
 CREATE INDEX IF NOT EXISTS blob_refs_user_id ON blob_refs(user_id);
@@ -66,6 +82,7 @@ CREATE TABLE IF NOT EXISTS blob_manifest_chunks (
 CREATE INDEX IF NOT EXISTS blob_manifest_chunks_chunk_digest ON blob_manifest_chunks(chunk_digest);
 CREATE TABLE IF NOT EXISTS upload_sessions (
   user_id INTEGER NOT NULL,
+  shelf_id INTEGER NOT NULL,
   key_id INTEGER NOT NULL,
   digest TEXT NOT NULL,
   size INTEGER NOT NULL,
@@ -73,23 +90,27 @@ CREATE TABLE IF NOT EXISTS upload_sessions (
   physical_pending_bytes INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (user_id, digest),
+  PRIMARY KEY (user_id, shelf_id, digest),
   FOREIGN KEY(user_id) REFERENCES users(id),
+  FOREIGN KEY(shelf_id) REFERENCES shelves(id),
   FOREIGN KEY(key_id) REFERENCES key_ids(id)
 );
 CREATE TABLE IF NOT EXISTS upload_session_chunks (
   user_id INTEGER NOT NULL,
+  shelf_id INTEGER NOT NULL,
   digest TEXT NOT NULL,
   chunk_index INTEGER NOT NULL,
   chunk_digest TEXT NOT NULL,
   size INTEGER NOT NULL,
   uploaded INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (user_id, digest, chunk_index),
-  FOREIGN KEY(user_id, digest) REFERENCES upload_sessions(user_id, digest)
+  PRIMARY KEY (user_id, shelf_id, digest, chunk_index),
+  FOREIGN KEY(user_id, shelf_id, digest) REFERENCES upload_sessions(user_id, shelf_id, digest)
 );
 CREATE INDEX IF NOT EXISTS upload_session_chunks_digest ON upload_session_chunks(digest);
-INSERT OR REPLACE INTO users (id, name, enabled, max_bytes, max_pending_bytes, pending_bytes, max_simple_upload_bytes) VALUES (1, 'test-user-1', 1, 3221225472, 4026531840, 0, 67108864);
-INSERT OR REPLACE INTO users (id, name, enabled, max_bytes, max_pending_bytes, pending_bytes, max_simple_upload_bytes) VALUES (2, 'test-user-2', 1, 3221225472, 4026531840, 0, 67108864);
+INSERT OR REPLACE INTO users (id, name, enabled, max_bytes, max_pending_bytes, pending_bytes, max_simple_upload_bytes, multi_shelf_enabled) VALUES (1, 'test-user-1', 1, 3221225472, 4026531840, 0, 67108864, 0);
+INSERT OR REPLACE INTO users (id, name, enabled, max_bytes, max_pending_bytes, pending_bytes, max_simple_upload_bytes, multi_shelf_enabled) VALUES (2, 'test-user-2', 1, 3221225472, 4026531840, 0, 67108864, 0);
+INSERT OR REPLACE INTO shelves (id, user_id, name, enabled, is_default, max_bytes, max_pending_bytes, pending_bytes) VALUES (1, 1, 'default', 1, 1, 3221225472, 4026531840, 0);
+INSERT OR REPLACE INTO shelves (id, user_id, name, enabled, is_default, max_bytes, max_pending_bytes, pending_bytes) VALUES (2, 2, 'default', 1, 1, 3221225472, 4026531840, 0);
 INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (1, 1, 'test-key-1', 1);
 INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (2, 2, 'test-key-2', 1);
 INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (3, 1, 'test-key-3', 1);

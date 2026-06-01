@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -31,10 +32,18 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  sht cat     [<digest> ...] # print blobs; reads whitespace-delimited digests from stdin when none are given")
 	fmt.Fprintln(os.Stderr, "  sht stat    [<digest> ...] # stat blobs; reads whitespace-delimited digests from stdin when none are given")
 	fmt.Fprintln(os.Stderr, "  sht release [<digest> ...] # release blobs; reads whitespace-delimited digests from stdin when none are given")
-	fmt.Fprintln(os.Stderr, "  sht list [-dskcta] # list refs; d=digest, s=size, k=key_id, c=created_at, t=state, a=all")
+	fmt.Fprintln(os.Stderr, "  sht list [-dhskcta] # list refs; d=digest, h=shelf, s=size, k=key_id, c=created_at, t=state, a=all")
+	fmt.Fprintln(os.Stderr, "  sht quota         # show total user quota usage")
+	fmt.Fprintln(os.Stderr, "  sht shelf list")
+	fmt.Fprintln(os.Stderr, "  sht shelf create <name> <max_bytes> <max_pending_bytes>")
+	fmt.Fprintln(os.Stderr, "  sht shelf rename <old> <new>")
+	fmt.Fprintln(os.Stderr, "  sht shelf set-default <name>")
+	fmt.Fprintln(os.Stderr, "  sht shelf delete <name> --force")
+	fmt.Fprintln(os.Stderr, "  sht <shelf>        # upload stdin to a shelf when multi-shelf mode is enabled")
+	fmt.Fprintln(os.Stderr, "  sht <shelf> <release|list|manifest|upload|status|finalize> ...")
 	fmt.Fprintln(os.Stderr, "  sht manifest       # create/resume upload from JSON manifest on stdin")
-	fmt.Fprintln(os.Stderr, "  sht upload-chunk <digest> <index> # upload raw chunk bytes from stdin")
-	fmt.Fprintln(os.Stderr, "  sht upload-status <digest> # show resumable upload status")
+	fmt.Fprintln(os.Stderr, "  sht upload <digest> <index> # upload raw chunk bytes from stdin")
+	fmt.Fprintln(os.Stderr, "  sht status <digest> # show resumable upload status")
 	fmt.Fprintln(os.Stderr, "  sht finalize <digest> # finalize a complete resumable upload")
 	fmt.Fprintln(os.Stderr, "  sht help          # show this message")
 }
@@ -63,12 +72,28 @@ func releaseUsage() {
 	fmt.Fprintln(os.Stderr, "When no digests are given as arguments, digests are read from stdin.")
 }
 
+func shelfUsage() {
+	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  sht shelf list")
+	fmt.Fprintln(os.Stderr, "  sht shelf create <name> <max_bytes> <max_pending_bytes>")
+	fmt.Fprintln(os.Stderr, "  sht shelf rename <old> <new>")
+	fmt.Fprintln(os.Stderr, "  sht shelf set-default <name>")
+	fmt.Fprintln(os.Stderr, "  sht shelf delete <name> --force")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Creating a non-default shelf enables multi-shelf mode.")
+	fmt.Fprintln(os.Stderr, "After that, scoped commands use the shelf name as the first word:")
+	fmt.Fprintln(os.Stderr, "  sht <shelf>")
+	fmt.Fprintln(os.Stderr, "  sht <shelf> list [-dhskcta]")
+	fmt.Fprintln(os.Stderr, "  sht <shelf> release [<digest> ...]")
+}
+
 func listUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sht list [-dskcta]")
+	fmt.Fprintln(os.Stderr, "  sht list [-dhskcta]")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "fields:")
 	fmt.Fprintln(os.Stderr, "  -d  digest")
+	fmt.Fprintln(os.Stderr, "  -h  shelf")
 	fmt.Fprintln(os.Stderr, "  -s  size")
 	fmt.Fprintln(os.Stderr, "  -k  key_id")
 	fmt.Fprintln(os.Stderr, "  -c  created_at")
@@ -78,7 +103,8 @@ func listUsage() {
 	fmt.Fprintln(os.Stderr, "examples:")
 	fmt.Fprintln(os.Stderr, "  sht list")
 	fmt.Fprintln(os.Stderr, "  sht list -d")
-	fmt.Fprintln(os.Stderr, "  sht list -dt")
+	fmt.Fprintln(os.Stderr, "  sht list -dht")
+	fmt.Fprintln(os.Stderr, "  sht <shelf> list -dt")
 }
 
 func die(format string, args ...any) {
@@ -96,6 +122,7 @@ type BlobRef struct {
 	Digest    string `json:"digest"`
 	Size      int64  `json:"size"`
 	KeyID     int64  `json:"key_id"`
+	Shelf     string `json:"shelf"`
 	CreatedAt string `json:"created_at"`
 	Dirty     bool   `json:"dirty"`
 }
@@ -121,6 +148,41 @@ type ChunkUploadResponse struct {
 	ChunkDigest string `json:"chunk_digest"`
 	Size        int64  `json:"size"`
 	Exists      bool   `json:"exists"`
+}
+
+type Shelf struct {
+	ID              int64  `json:"id"`
+	Name            string `json:"name"`
+	MaxBytes        int64  `json:"max_bytes"`
+	UsedBytes       int64  `json:"used_bytes"`
+	MaxPendingBytes int64  `json:"max_pending_bytes"`
+	PendingBytes    int64  `json:"pending_bytes"`
+	RefCount        int64  `json:"ref_count"`
+	Enabled         bool   `json:"enabled"`
+	IsDefault       bool   `json:"is_default"`
+}
+
+type ShelfListResponse struct {
+	Shelves []Shelf `json:"shelves"`
+}
+
+type QuotaResponse struct {
+	UsedBytes           int64 `json:"used_bytes"`
+	MaxBytes            int64 `json:"max_bytes"`
+	PendingBytes        int64 `json:"pending_bytes"`
+	MaxPendingBytes     int64 `json:"max_pending_bytes"`
+	UploadReservedBytes int64 `json:"upload_reserved_bytes"`
+	CleanDigestCount    int64 `json:"clean_digest_count"`
+}
+
+type ShelfCreateRequest struct {
+	Name            string `json:"name"`
+	MaxBytes        int64  `json:"max_bytes"`
+	MaxPendingBytes int64  `json:"max_pending_bytes"`
+}
+
+type ShelfRenameRequest struct {
+	Name string `json:"name"`
 }
 
 func newClient() *http.Client {
@@ -162,7 +224,13 @@ func collectDigests(args []string, command string) []string {
 	return digests
 }
 
-func store(keyID int64) {
+func setShelfHeader(req *http.Request, shelf string) {
+	if shelf != "" {
+		req.Header.Set("X-SHT-Shelf", shelf)
+	}
+}
+
+func store(keyID int64, shelf string) {
 	client := newClient()
 
 	req, err := http.NewRequest(http.MethodPost, "http://sht/blob", os.Stdin)
@@ -171,6 +239,7 @@ func store(keyID int64) {
 	}
 
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	setShelfHeader(req, shelf)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -223,6 +292,7 @@ func cat(digests []string, keyID int64) {
 			ok = false
 		}
 	}
+	fmt.Println()
 	if !ok {
 		os.Exit(1)
 	}
@@ -284,13 +354,14 @@ func stat(digests []string, keyID int64) {
 	}
 }
 
-func releaseOne(client *http.Client, digest string, keyID int64) (int, error) {
+func releaseOne(client *http.Client, digest string, keyID int64, shelf string) (int, error) {
 	req, err := http.NewRequest(http.MethodDelete, "http://sht/blob/"+digest, nil)
 	if err != nil {
 		return 0, err
 	}
 
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	setShelfHeader(req, shelf)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -301,13 +372,13 @@ func releaseOne(client *http.Client, digest string, keyID int64) (int, error) {
 	return resp.StatusCode, nil
 }
 
-func release(digests []string, keyID int64) {
+func release(digests []string, keyID int64, shelf string) {
 	client := newClient()
 	multiple := len(digests) > 1
 	ok := true
 
 	for _, digest := range digests {
-		code, err := releaseOne(client, digest, keyID)
+		code, err := releaseOne(client, digest, keyID, shelf)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -349,13 +420,13 @@ func parseListFields(args []string) string {
 		os.Exit(0)
 	}
 	if len(args) != 1 || !strings.HasPrefix(args[0], "-") || args[0] == "-" {
-		die("usage: sht list [-dskcta]")
+		die("usage: sht list [-dhskcta]")
 	}
 
 	fields := strings.TrimPrefix(args[0], "-")
 	for _, field := range fields {
 		switch field {
-		case 'd', 's', 'k', 'c', 't', 'a':
+		case 'd', 'h', 's', 'k', 'c', 't', 'a':
 		default:
 			die("unknown list field: %c", field)
 		}
@@ -383,7 +454,70 @@ func printRefLine(ref BlobRef, line string, dimDirty bool) {
 	fmt.Println(line)
 }
 
-func refs(keyID int64, fields string) {
+func refFieldValues(ref BlobRef, fields string) []string {
+	if strings.ContainsRune(fields, 'a') {
+		return []string{
+			ref.Digest,
+			ref.Shelf,
+			strconv.FormatInt(ref.Size, 10),
+			strconv.FormatInt(ref.KeyID, 10),
+			ref.CreatedAt,
+			refState(ref),
+		}
+	}
+
+	var values []string
+	for _, field := range fields {
+		switch field {
+		case 'd':
+			values = append(values, ref.Digest)
+		case 'h':
+			values = append(values, ref.Shelf)
+		case 's':
+			values = append(values, strconv.FormatInt(ref.Size, 10))
+		case 'k':
+			values = append(values, strconv.FormatInt(ref.KeyID, 10))
+		case 'c':
+			values = append(values, ref.CreatedAt)
+		case 't':
+			values = append(values, refState(ref))
+		}
+	}
+	return values
+}
+
+func formatRefRows(refs []BlobRef, fields string) []string {
+	rows := make([][]string, 0, len(refs))
+	var widths []int
+	for _, ref := range refs {
+		values := refFieldValues(ref, fields)
+		if widths == nil {
+			widths = make([]int, len(values))
+		}
+		for i, value := range values {
+			if len(value) > widths[i] {
+				widths[i] = len(value)
+			}
+		}
+		rows = append(rows, values)
+	}
+
+	lines := make([]string, 0, len(rows))
+	for _, row := range rows {
+		var parts []string
+		for i, value := range row {
+			if i == len(row)-1 {
+				parts = append(parts, value)
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%-*s", widths[i], value))
+		}
+		lines = append(lines, strings.Join(parts, "  "))
+	}
+	return lines
+}
+
+func refs(keyID int64, fields string, shelf string) {
 	client := newClient()
 
 	req, err := http.NewRequest(http.MethodGet, "http://sht/refs", nil)
@@ -392,6 +526,7 @@ func refs(keyID int64, fields string) {
 	}
 
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	setShelfHeader(req, shelf)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -410,28 +545,9 @@ func refs(keyID int64, fields string) {
 	}
 
 	dimDirty := stdoutIsTerminal()
-	for _, ref := range out.Refs {
-		if strings.ContainsRune(fields, 'a') {
-			printRefLine(ref, fmt.Sprintf("%s %d %d %s %s", ref.Digest, ref.Size, ref.KeyID, ref.CreatedAt, refState(ref)), dimDirty)
-			continue
-		}
-
-		var values []string
-		for _, field := range fields {
-			switch field {
-			case 'd':
-				values = append(values, ref.Digest)
-			case 's':
-				values = append(values, strconv.FormatInt(ref.Size, 10))
-			case 'k':
-				values = append(values, strconv.FormatInt(ref.KeyID, 10))
-			case 'c':
-				values = append(values, ref.CreatedAt)
-			case 't':
-				values = append(values, refState(ref))
-			}
-		}
-		printRefLine(ref, strings.Join(values, " "), dimDirty)
+	lines := formatRefRows(out.Refs, fields)
+	for i, ref := range out.Refs {
+		printRefLine(ref, lines[i], dimDirty)
 	}
 }
 
@@ -464,12 +580,13 @@ func printJSON(value any) {
 	fmt.Println(string(data))
 }
 
-func manifest(keyID int64) {
+func manifest(keyID int64, shelf string) {
 	req, err := http.NewRequest(http.MethodPost, "http://sht/uploads", os.Stdin)
 	if err != nil {
 		log.Fatal(err)
 	}
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	setShelfHeader(req, shelf)
 	req.Header.Set("Content-Type", "application/json")
 
 	var out UploadStatusResponse
@@ -477,9 +594,9 @@ func manifest(keyID int64) {
 	printJSON(out)
 }
 
-func uploadChunk(keyID int64, args []string) {
+func uploadChunk(keyID int64, args []string, shelf string) {
 	if len(args) != 2 {
-		die("usage: sht upload-chunk <digest> <index>")
+		die("usage: sht upload <digest> <index>")
 	}
 	index, err := strconv.ParseInt(args[1], 10, 64)
 	if err != nil || index < 0 {
@@ -491,28 +608,30 @@ func uploadChunk(keyID int64, args []string) {
 		log.Fatal(err)
 	}
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	setShelfHeader(req, shelf)
 
 	var out ChunkUploadResponse
 	doUploadRequest(req, &out)
 	printJSON(out)
 }
 
-func uploadStatus(keyID int64, args []string) {
+func uploadStatus(keyID int64, args []string, shelf string) {
 	if len(args) != 1 {
-		die("usage: sht upload-status <digest>")
+		die("usage: sht status <digest>")
 	}
 	req, err := http.NewRequest(http.MethodGet, "http://sht/uploads/"+args[0], nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	setShelfHeader(req, shelf)
 
 	var out UploadStatusResponse
 	doUploadRequest(req, &out)
 	printJSON(out)
 }
 
-func finalize(keyID int64, args []string) {
+func finalize(keyID int64, args []string, shelf string) {
 	if len(args) != 1 {
 		die("usage: sht finalize <digest>")
 	}
@@ -521,14 +640,239 @@ func finalize(keyID int64, args []string) {
 		log.Fatal(err)
 	}
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	setShelfHeader(req, shelf)
 
 	var out StoreBlobResponse
 	doUploadRequest(req, &out)
 	fmt.Println(out.Digest)
 }
 
+func quota(keyID int64, args []string) {
+	if len(args) != 0 {
+		die("usage: sht quota")
+	}
+	req, err := http.NewRequest(http.MethodGet, "http://sht/quota", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	var out QuotaResponse
+	doUploadRequest(req, &out)
+	rows := [][]string{
+		{"live", fmt.Sprintf("%d/%d", out.UsedBytes, out.MaxBytes)},
+		{"pending", fmt.Sprintf("%d/%d", out.PendingBytes, out.MaxPendingBytes)},
+		{"reserved", strconv.FormatInt(out.UploadReservedBytes, 10)},
+		{"clean", strconv.FormatInt(out.CleanDigestCount, 10)},
+	}
+	width := 0
+	for _, row := range rows {
+		if len(row[0]) > width {
+			width = len(row[0])
+		}
+	}
+	for _, row := range rows {
+		fmt.Printf("%-*s  %s\n", width, row[0], row[1])
+	}
+}
+
+func shelfList(keyID int64) {
+	req, err := http.NewRequest(http.MethodGet, "http://sht/shelves", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	var out ShelfListResponse
+	doUploadRequest(req, &out)
+	rows := make([][]string, 0, len(out.Shelves))
+	widths := make([]int, 6)
+	for _, shelf := range out.Shelves {
+		state := "disabled"
+		if shelf.Enabled {
+			state = "enabled"
+		}
+		defaultMarker := ""
+		if shelf.IsDefault {
+			defaultMarker = "default"
+		}
+		row := []string{
+			shelf.Name,
+			fmt.Sprintf("%d/%d", shelf.UsedBytes, shelf.MaxBytes),
+			fmt.Sprintf("%d/%d", shelf.PendingBytes, shelf.MaxPendingBytes),
+			strconv.FormatInt(shelf.RefCount, 10),
+			state,
+			defaultMarker,
+		}
+		for i, value := range row {
+			if len(value) > widths[i] {
+				widths[i] = len(value)
+			}
+		}
+		rows = append(rows, row)
+	}
+	for _, row := range rows {
+		fmt.Printf("%-*s  %*s  %*s  %*s  %-*s", widths[0], row[0], widths[1], row[1], widths[2], row[2], widths[3], row[3], widths[4], row[4])
+		if row[5] != "" {
+			fmt.Printf("  %s", row[5])
+		}
+		fmt.Println()
+	}
+}
+
+func shelfCreate(keyID int64, args []string) {
+	if len(args) != 3 {
+		die("usage: sht shelf create <name> <max_bytes> <max_pending_bytes>")
+	}
+	maxBytes, err := strconv.ParseInt(args[1], 10, 64)
+	if err != nil || maxBytes <= 0 {
+		die("invalid max_bytes")
+	}
+	maxPendingBytes, err := strconv.ParseInt(args[2], 10, 64)
+	if err != nil || maxPendingBytes <= 0 {
+		die("invalid max_pending_bytes")
+	}
+	body, err := json.Marshal(ShelfCreateRequest{
+		Name:            args[0],
+		MaxBytes:        maxBytes,
+		MaxPendingBytes: maxPendingBytes,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://sht/shelves", strings.NewReader(string(body)))
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	req.Header.Set("Content-Type", "application/json")
+
+	var out Shelf
+	doUploadRequest(req, &out)
+	fmt.Printf("%s %d %d enabled\n", out.Name, out.MaxBytes, out.MaxPendingBytes)
+}
+
+func shelfRename(keyID int64, args []string) {
+	if len(args) != 2 {
+		die("usage: sht shelf rename <old> <new>")
+	}
+	body, err := json.Marshal(ShelfRenameRequest{Name: args[1]})
+	if err != nil {
+		log.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPatch, "http://sht/shelves/"+url.PathEscape(args[0]), strings.NewReader(string(body)))
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	req.Header.Set("Content-Type", "application/json")
+
+	var out Shelf
+	doUploadRequest(req, &out)
+	state := "disabled"
+	if out.Enabled {
+		state = "enabled"
+	}
+	if out.IsDefault {
+		fmt.Printf("%s %d %d %s default\n", out.Name, out.MaxBytes, out.MaxPendingBytes, state)
+		return
+	}
+	fmt.Printf("%s %d %d %s\n", out.Name, out.MaxBytes, out.MaxPendingBytes, state)
+}
+
+func shelfSetDefault(keyID int64, args []string) {
+	if len(args) != 1 {
+		die("usage: sht shelf set-default <name>")
+	}
+	req, err := http.NewRequest(http.MethodPost, "http://sht/shelves/"+url.PathEscape(args[0])+"/default", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	var out Shelf
+	doUploadRequest(req, &out)
+	fmt.Printf("%s default\n", out.Name)
+}
+
+func shelfDelete(keyID int64, args []string) {
+	if len(args) != 2 || (args[1] != "--force" && args[1] != "-f") {
+		die("usage: sht shelf delete <name> --force")
+	}
+	req, err := http.NewRequest(http.MethodDelete, "http://sht/shelves/"+url.PathEscape(args[0])+"?force=1", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	doUploadRequest(req, nil)
+	fmt.Println("deleted")
+}
+
+func shelfCommand(keyID int64, args []string) {
+	if len(args) == 0 || (len(args) == 1 && (args[0] == "-h" || args[0] == "--help")) {
+		shelfUsage()
+		if len(args) == 0 {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	switch args[0] {
+	case "list":
+		if len(args) != 1 {
+			die("usage: sht shelf list")
+		}
+		shelfList(keyID)
+	case "create":
+		shelfCreate(keyID, args[1:])
+	case "rename":
+		shelfRename(keyID, args[1:])
+	case "set-default":
+		shelfSetDefault(keyID, args[1:])
+	case "delete":
+		shelfDelete(keyID, args[1:])
+	default:
+		die("usage: sht shelf list|create|rename|set-default|delete")
+	}
+}
+
 func commandArgs() []string {
 	return strings.Fields(os.Getenv("SSH_ORIGINAL_COMMAND"))
+}
+
+func isCommand(arg string) bool {
+	switch arg {
+	case "stat", "cat", "release", "list", "refs", "quota", "manifest", "upload", "upload-chunk", "status", "upload-status", "finalize", "help", "-h", "--help", "shelf", "create", "rename", "set-default", "delete":
+		return true
+	default:
+		return false
+	}
+}
+
+func scopedCommand(args []string, id int64, shelf string) {
+	if len(args) == 0 {
+		store(id, shelf)
+		return
+	}
+	switch args[0] {
+	case "release":
+		release(collectDigests(args[1:], "release"), id, shelf)
+	case "list", "refs":
+		refs(id, parseListFields(args[1:]), shelf)
+	case "manifest":
+		if len(args) != 1 {
+			die("usage: sht manifest < manifest.json")
+		}
+		manifest(id, shelf)
+	case "upload", "upload-chunk":
+		uploadChunk(id, args[1:], shelf)
+	case "status", "upload-status":
+		uploadStatus(id, args[1:], shelf)
+	case "finalize":
+		finalize(id, args[1:], shelf)
+	default:
+		die("unknown scoped command: %s", args[0])
+	}
 }
 
 func main() {
@@ -553,7 +897,12 @@ func main() {
 	args := commandArgs()
 
 	if len(args) == 0 {
-		store(id)
+		store(id, "")
+		return
+	}
+
+	if !isCommand(args[0]) {
+		scopedCommand(args[1:], id, args[0])
 		return
 	}
 
@@ -563,22 +912,28 @@ func main() {
 	case "cat":
 		cat(collectDigests(args[1:], "cat"), id)
 	case "release":
-		release(collectDigests(args[1:], "release"), id)
+		release(collectDigests(args[1:], "release"), id, "")
 	case "list", "refs":
-		refs(id, parseListFields(args[1:]))
+		refs(id, parseListFields(args[1:]), "")
+	case "quota":
+		quota(id, args[1:])
+	case "shelf":
+		shelfCommand(id, args[1:])
 	case "manifest":
 		if len(args) != 1 {
 			die("usage: sht manifest < manifest.json")
 		}
-		manifest(id)
-	case "upload-chunk":
-		uploadChunk(id, args[1:])
-	case "upload-status":
-		uploadStatus(id, args[1:])
+		manifest(id, "")
+	case "upload", "upload-chunk":
+		uploadChunk(id, args[1:], "")
+	case "status", "upload-status":
+		uploadStatus(id, args[1:], "")
 	case "finalize":
-		finalize(id, args[1:])
+		finalize(id, args[1:], "")
 	case "help", "-h", "--help":
 		usage()
+	case "create", "rename", "set-default", "delete":
+		die("usage: sht shelf %s ...", args[0])
 	default:
 		die("unknown command: %s", args[0])
 	}
