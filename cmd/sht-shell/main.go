@@ -28,24 +28,21 @@ var (
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sht               # upload stdin")
-	fmt.Fprintln(os.Stderr, "  sht cat     [<digest> ...] # print blobs; reads whitespace-delimited digests from stdin when none are given")
-	fmt.Fprintln(os.Stderr, "  sht stat    [<digest> ...] # stat blobs; reads whitespace-delimited digests from stdin when none are given")
-	fmt.Fprintln(os.Stderr, "  sht release [<digest> ...] # release blobs; reads whitespace-delimited digests from stdin when none are given")
-	fmt.Fprintln(os.Stderr, "  sht list [-dhskcta] # list refs; d=digest, h=shelf, s=size, k=key_id, c=created_at, t=state, a=all")
-	fmt.Fprintln(os.Stderr, "  sht quota         # show total user quota usage")
-	fmt.Fprintln(os.Stderr, "  sht shelf list")
-	fmt.Fprintln(os.Stderr, "  sht shelf create <name> <max_bytes> <max_pending_bytes>")
-	fmt.Fprintln(os.Stderr, "  sht shelf rename <old> <new>")
-	fmt.Fprintln(os.Stderr, "  sht shelf set-default <name>")
-	fmt.Fprintln(os.Stderr, "  sht shelf delete <name> --force")
-	fmt.Fprintln(os.Stderr, "  sht <shelf>        # upload stdin to a shelf when multi-shelf mode is enabled")
-	fmt.Fprintln(os.Stderr, "  sht <shelf> <release|list|manifest|upload|status|finalize> ...")
-	fmt.Fprintln(os.Stderr, "  sht manifest       # create/resume upload from JSON manifest on stdin")
-	fmt.Fprintln(os.Stderr, "  sht upload <digest> <index> # upload raw chunk bytes from stdin")
-	fmt.Fprintln(os.Stderr, "  sht status <digest> # show resumable upload status")
-	fmt.Fprintln(os.Stderr, "  sht finalize <digest> # finalize a complete resumable upload")
-	fmt.Fprintln(os.Stderr, "  sht help          # show this message")
+	fmt.Fprintln(os.Stderr, "  sht                       upload stdin to default shelf")
+	fmt.Fprintln(os.Stderr, "  sht <shelf>               upload stdin to shelf")
+	fmt.Fprintln(os.Stderr, "  sht <command> [args...]")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "commands:")
+	fmt.Fprintln(os.Stderr, "  cat [digest ...]          print blobs")
+	fmt.Fprintln(os.Stderr, "  stat [digest ...]         show blob status")
+	fmt.Fprintln(os.Stderr, "  release [digest ...]      release blobs")
+	fmt.Fprintln(os.Stderr, "  list [fields]             list refs")
+	fmt.Fprintln(os.Stderr, "  quota                     show quota usage")
+	fmt.Fprintln(os.Stderr, "  shelf <command>           manage shelves")
+	fmt.Fprintln(os.Stderr, "  upload <command>          resumable uploads")
+	fmt.Fprintln(os.Stderr, "  help [topic]              show help")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "digest commands read digests from stdin when none are given.")
 }
 
 func catUsage() {
@@ -75,36 +72,47 @@ func releaseUsage() {
 func shelfUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
 	fmt.Fprintln(os.Stderr, "  sht shelf list")
-	fmt.Fprintln(os.Stderr, "  sht shelf create <name> <max_bytes> <max_pending_bytes>")
+	fmt.Fprintln(os.Stderr, "  sht shelf create <name> <max> [pending-max]")
 	fmt.Fprintln(os.Stderr, "  sht shelf rename <old> <new>")
-	fmt.Fprintln(os.Stderr, "  sht shelf set-default <name>")
+	fmt.Fprintln(os.Stderr, "  sht shelf default <name>")
 	fmt.Fprintln(os.Stderr, "  sht shelf delete <name> --force")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Creating a non-default shelf enables multi-shelf mode.")
 	fmt.Fprintln(os.Stderr, "After that, scoped commands use the shelf name as the first word:")
 	fmt.Fprintln(os.Stderr, "  sht <shelf>")
-	fmt.Fprintln(os.Stderr, "  sht <shelf> list [-dhskcta]")
-	fmt.Fprintln(os.Stderr, "  sht <shelf> release [<digest> ...]")
+	fmt.Fprintln(os.Stderr, "  sht <shelf> list [fields]")
+	fmt.Fprintln(os.Stderr, "  sht <shelf> release [digest ...]")
 }
 
 func listUsage() {
 	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sht list [-dhskcta]")
+	fmt.Fprintln(os.Stderr, "  sht list [fields]")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "fields:")
-	fmt.Fprintln(os.Stderr, "  -d  digest")
-	fmt.Fprintln(os.Stderr, "  -h  shelf")
-	fmt.Fprintln(os.Stderr, "  -s  size")
-	fmt.Fprintln(os.Stderr, "  -k  key_id")
-	fmt.Fprintln(os.Stderr, "  -c  created_at")
-	fmt.Fprintln(os.Stderr, "  -t  state (clean or dirty)")
-	fmt.Fprintln(os.Stderr, "  -a  all fields (default)")
+	fmt.Fprintln(os.Stderr, "  d  digest")
+	fmt.Fprintln(os.Stderr, "  h  shelf")
+	fmt.Fprintln(os.Stderr, "  s  size")
+	fmt.Fprintln(os.Stderr, "  k  key id")
+	fmt.Fprintln(os.Stderr, "  c  created at")
+	fmt.Fprintln(os.Stderr, "  t  state")
+	fmt.Fprintln(os.Stderr, "  a  all (default)")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "examples:")
 	fmt.Fprintln(os.Stderr, "  sht list")
-	fmt.Fprintln(os.Stderr, "  sht list -d")
-	fmt.Fprintln(os.Stderr, "  sht list -dht")
-	fmt.Fprintln(os.Stderr, "  sht <shelf> list -dt")
+	fmt.Fprintln(os.Stderr, "  sht list d")
+	fmt.Fprintln(os.Stderr, "  sht list dht")
+	fmt.Fprintln(os.Stderr, "  sht <shelf> list dt")
+}
+
+func uploadUsage() {
+	fmt.Fprintln(os.Stderr, "usage:")
+	fmt.Fprintln(os.Stderr, "  sht manifest              create/resume upload from manifest JSON")
+	fmt.Fprintln(os.Stderr, "  sht upload <id> <index>   upload chunk bytes")
+	fmt.Fprintln(os.Stderr, "  sht status <id>           show upload status")
+	fmt.Fprintln(os.Stderr, "  sht finalize <id>         finalize upload")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Pipe the manifest JSON to stdin for 'manifest'.")
+	fmt.Fprintln(os.Stderr, "Pipe chunk bytes to stdin for 'upload'.")
 }
 
 func die(format string, args ...any) {
@@ -419,11 +427,14 @@ func parseListFields(args []string) string {
 		listUsage()
 		os.Exit(0)
 	}
-	if len(args) != 1 || !strings.HasPrefix(args[0], "-") || args[0] == "-" {
-		die("usage: sht list [-dhskcta]")
+	if len(args) != 1 {
+		die("usage: sht list [fields]")
 	}
 
 	fields := strings.TrimPrefix(args[0], "-")
+	if fields == "" {
+		die("usage: sht list [fields]")
+	}
 	for _, field := range fields {
 		switch field {
 		case 'd', 'h', 's', 'k', 'c', 't', 'a':
@@ -782,7 +793,7 @@ func shelfRename(keyID int64, args []string) {
 
 func shelfSetDefault(keyID int64, args []string) {
 	if len(args) != 1 {
-		die("usage: sht shelf set-default <name>")
+		die("usage: sht shelf default <name>")
 	}
 	req, err := http.NewRequest(http.MethodPost, "http://sht/shelves/"+url.PathEscape(args[0])+"/default", nil)
 	if err != nil {
@@ -827,12 +838,12 @@ func shelfCommand(keyID int64, args []string) {
 		shelfCreate(keyID, args[1:])
 	case "rename":
 		shelfRename(keyID, args[1:])
-	case "set-default":
+	case "default", "set-default":
 		shelfSetDefault(keyID, args[1:])
 	case "delete":
 		shelfDelete(keyID, args[1:])
 	default:
-		die("usage: sht shelf list|create|rename|set-default|delete")
+		die("usage: sht shelf list|create|rename|default|delete")
 	}
 }
 
@@ -842,7 +853,7 @@ func commandArgs() []string {
 
 func isCommand(arg string) bool {
 	switch arg {
-	case "stat", "cat", "release", "list", "refs", "quota", "manifest", "upload", "upload-chunk", "status", "upload-status", "finalize", "help", "-h", "--help", "shelf", "create", "rename", "set-default", "delete":
+	case "stat", "cat", "release", "list", "refs", "quota", "manifest", "upload", "upload-chunk", "status", "upload-status", "finalize", "help", "-h", "--help", "shelf", "create", "rename", "set-default", "default", "delete":
 		return true
 	default:
 		return false
@@ -931,8 +942,27 @@ func main() {
 	case "finalize":
 		finalize(id, args[1:], "")
 	case "help", "-h", "--help":
-		usage()
-	case "create", "rename", "set-default", "delete":
+		if len(args) >= 2 {
+			switch args[1] {
+			case "cat":
+				catUsage()
+			case "stat":
+				statUsage()
+			case "release":
+				releaseUsage()
+			case "shelf":
+				shelfUsage()
+			case "list":
+				listUsage()
+			case "upload":
+				uploadUsage()
+			default:
+				die("unknown help topic: %s", args[1])
+			}
+		} else {
+			usage()
+		}
+	case "create", "rename", "set-default", "default", "delete":
 		die("usage: sht shelf %s ...", args[0])
 	default:
 		die("unknown command: %s", args[0])
