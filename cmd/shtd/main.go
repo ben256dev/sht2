@@ -218,13 +218,144 @@ type QuotaResponse struct {
 	CleanDigestCount    int64 `json:"clean_digest_count"`
 }
 
+type AliasNamespace struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	OwnerID int64  `json:"owner_user_id"`
+}
+
+type AliasNamespaceListResponse struct {
+	Namespaces []AliasNamespace `json:"namespaces"`
+}
+
+type AliasNamespaceCreateRequest struct {
+	Name string `json:"name"`
+}
+
+type AliasGrant struct {
+	Namespace string `json:"namespace,omitempty"`
+	Path      string `json:"path"`
+	User      string `json:"user"`
+	Role      string `json:"role"`
+}
+
+type AliasGrantRequest struct {
+	Path string `json:"path"`
+	User string `json:"user"`
+	Role string `json:"role,omitempty"`
+}
+
+type AliasGrantResponse struct {
+	Grant AliasGrant `json:"grant"`
+}
+
+type Alias struct {
+	Namespace        string `json:"namespace"`
+	Path             string `json:"path"`
+	Digest           string `json:"digest"`
+	CurrentVersionID int64  `json:"current_version_id"`
+	UpdatedAt        string `json:"updated_at"`
+}
+
+type AliasListResponse struct {
+	Aliases []Alias `json:"aliases"`
+}
+
+type AliasVersion struct {
+	ID                int64   `json:"id"`
+	Namespace         string  `json:"namespace"`
+	Path              string  `json:"path"`
+	Digest            string  `json:"digest"`
+	AuthorUserID      int64   `json:"author_user_id"`
+	AuthorUser        string  `json:"author_user"`
+	PreviousVersionID *int64  `json:"previous_version_id,omitempty"`
+	Message           *string `json:"message,omitempty"`
+	CreatedAt         string  `json:"created_at"`
+}
+
+type AliasVersionListResponse struct {
+	Versions []AliasVersion `json:"versions"`
+}
+
+type AliasVersionCreateRequest struct {
+	Digest          string `json:"digest"`
+	ExpectedVersion *int64 `json:"expected_version"`
+	Message         string `json:"message,omitempty"`
+}
+
+type AliasConflictResponse struct {
+	Error          string `json:"error"`
+	CurrentVersion int64  `json:"current_version"`
+}
+
 func shelfNameReserved(name string) bool {
 	switch name {
-	case "cat", "stat", "release", "list", "refs", "quota", "manifest", "upload", "upload-chunk", "status", "upload-status", "finalize", "help", "shelf":
+	case "--", "cat", "stat", "release", "list", "refs", "quota", "manifest", "upload", "upload-chunk", "status", "upload-status", "finalize", "help", "shelf", "alias":
 		return true
 	default:
 		return false
 	}
+}
+
+func validateAliasNamespaceName(name string) error {
+	if err := validateShelfName(name); err != nil {
+		return err
+	}
+	if name == "namespaces" {
+		return fmt.Errorf("reserved alias namespace")
+	}
+	return nil
+}
+
+func normalizeAliasPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return "", fmt.Errorf("invalid alias path")
+	}
+	parts := strings.Split(path, "/")
+	for _, part := range parts {
+		if !shelfNamePattern.MatchString(part) || part == "." || part == ".." {
+			return "", fmt.Errorf("invalid alias path")
+		}
+	}
+	switch parts[0] {
+	case "grants":
+		return "", fmt.Errorf("reserved alias path")
+	}
+	switch parts[len(parts)-1] {
+	case "blob", "versions":
+		return "", fmt.Errorf("reserved alias path")
+	}
+	return strings.Join(parts, "/"), nil
+}
+
+func normalizeAliasGrantPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" || path == "/" {
+		return "", nil
+	}
+	return normalizeAliasPath(path)
+}
+
+func roleRank(role string) int {
+	switch role {
+	case "read":
+		return 1
+	case "write":
+		return 2
+	case "admin":
+		return 3
+	default:
+		return 0
+	}
+}
+
+func validateAliasRole(role string) error {
+	if roleRank(role) == 0 {
+		return fmt.Errorf("invalid alias role")
+	}
+	return nil
 }
 
 func validateShelfName(name string) error {
@@ -1393,6 +1524,327 @@ func handleQuotaGet(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func userByName(db *sql.DB, name string) (int64, error) {
+	var id int64
+	err := db.QueryRow("SELECT id FROM users WHERE name = ? AND enabled = 1", name).Scan(&id)
+	return id, err
+}
+
+func aliasNamespaceByName(db *sql.DB, name string) (AliasNamespace, error) {
+	var ns AliasNamespace
+	err := db.QueryRow("SELECT id, name, owner_user_id FROM alias_namespaces WHERE name = ?", name).Scan(&ns.ID, &ns.Name, &ns.OwnerID)
+	return ns, err
+}
+
+func effectiveAliasRole(db *sql.DB, namespaceID, userID int64, path string) (string, error) {
+	rows, err := db.Query("SELECT path, role FROM alias_grants WHERE namespace_id = ? AND user_id = ?", namespaceID, userID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	bestRole := ""
+	bestRank := 0
+	for rows.Next() {
+		var grantPath, role string
+		if err := rows.Scan(&grantPath, &role); err != nil {
+			return "", err
+		}
+		if grantPath != "" && path != grantPath && !strings.HasPrefix(path, grantPath+"/") {
+			continue
+		}
+		if rank := roleRank(role); rank > bestRank {
+			bestRank = rank
+			bestRole = role
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return bestRole, nil
+}
+
+func requireAliasRole(db *sql.DB, ns AliasNamespace, userID int64, path string, required string) error {
+	role, err := effectiveAliasRole(db, ns.ID, userID, path)
+	if err != nil {
+		return err
+	}
+	if roleRank(role) < roleRank(required) {
+		return fmt.Errorf("alias permission denied")
+	}
+	return nil
+}
+
+func userAliasNamespaces(db *sql.DB, userID int64) ([]AliasNamespace, error) {
+	rows, err := db.Query(`
+		SELECT DISTINCT alias_namespaces.id, alias_namespaces.name, alias_namespaces.owner_user_id
+		FROM alias_namespaces
+		JOIN alias_grants ON alias_grants.namespace_id = alias_namespaces.id
+		WHERE alias_grants.user_id = ?
+		ORDER BY alias_namespaces.name ASC
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var namespaces []AliasNamespace
+	for rows.Next() {
+		var ns AliasNamespace
+		if err := rows.Scan(&ns.ID, &ns.Name, &ns.OwnerID); err != nil {
+			return nil, err
+		}
+		namespaces = append(namespaces, ns)
+	}
+	return namespaces, rows.Err()
+}
+
+func createAliasNamespace(db *sql.DB, p Principal, req AliasNamespaceCreateRequest) (AliasNamespace, error) {
+	if err := validateAliasNamespaceName(req.Name); err != nil {
+		return AliasNamespace{}, err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return AliasNamespace{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec("INSERT INTO alias_namespaces (name, owner_user_id) VALUES (?, ?)", req.Name, p.UserID)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return AliasNamespace{}, fmt.Errorf("alias namespace already exists")
+		}
+		return AliasNamespace{}, err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return AliasNamespace{}, err
+	}
+	if _, err := tx.Exec("INSERT INTO alias_grants (namespace_id, path, user_id, role) VALUES (?, '', ?, 'admin')", id, p.UserID); err != nil {
+		return AliasNamespace{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AliasNamespace{}, err
+	}
+	return AliasNamespace{ID: id, Name: req.Name, OwnerID: p.UserID}, nil
+}
+
+func listAliases(db *sql.DB, ns AliasNamespace, userID int64, prefix string) ([]Alias, error) {
+	role, err := effectiveAliasRole(db, ns.ID, userID, prefix)
+	if err != nil {
+		return nil, err
+	}
+	if roleRank(role) < roleRank("read") {
+		return nil, fmt.Errorf("alias permission denied")
+	}
+	query := `
+		SELECT aliases.path, alias_versions.digest, aliases.current_version_id, aliases.updated_at
+		FROM aliases
+		JOIN alias_versions ON alias_versions.id = aliases.current_version_id
+		WHERE aliases.namespace_id = ?
+	`
+	args := []any{ns.ID}
+	if prefix != "" {
+		query += " AND (aliases.path = ? OR aliases.path LIKE ?)"
+		args = append(args, prefix, prefix+"/%")
+	}
+	query += " ORDER BY aliases.path ASC"
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var aliases []Alias
+	for rows.Next() {
+		var a Alias
+		a.Namespace = ns.Name
+		if err := rows.Scan(&a.Path, &a.Digest, &a.CurrentVersionID, &a.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if err := requireAliasRole(db, ns, userID, a.Path, "read"); err != nil {
+			continue
+		}
+		aliases = append(aliases, a)
+	}
+	return aliases, rows.Err()
+}
+
+func getAlias(db *sql.DB, ns AliasNamespace, userID int64, path string) (Alias, error) {
+	if err := requireAliasRole(db, ns, userID, path, "read"); err != nil {
+		return Alias{}, err
+	}
+	var a Alias
+	a.Namespace = ns.Name
+	err := db.QueryRow(`
+		SELECT aliases.path, alias_versions.digest, aliases.current_version_id, aliases.updated_at
+		FROM aliases
+		JOIN alias_versions ON alias_versions.id = aliases.current_version_id
+		WHERE aliases.namespace_id = ? AND aliases.path = ?
+	`, ns.ID, path).Scan(&a.Path, &a.Digest, &a.CurrentVersionID, &a.UpdatedAt)
+	return a, err
+}
+
+func aliasVersions(db *sql.DB, ns AliasNamespace, userID int64, path string) ([]AliasVersion, error) {
+	if err := requireAliasRole(db, ns, userID, path, "read"); err != nil {
+		return nil, err
+	}
+	rows, err := db.Query(`
+		SELECT alias_versions.id, alias_versions.digest, alias_versions.author_user_id, users.name,
+		       alias_versions.previous_version_id, alias_versions.message, alias_versions.created_at
+		FROM alias_versions
+		JOIN users ON users.id = alias_versions.author_user_id
+		WHERE alias_versions.namespace_id = ? AND alias_versions.path = ?
+		ORDER BY alias_versions.id DESC
+	`, ns.ID, path)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var versions []AliasVersion
+	for rows.Next() {
+		var v AliasVersion
+		var prev sql.NullInt64
+		var message sql.NullString
+		v.Namespace = ns.Name
+		v.Path = path
+		if err := rows.Scan(&v.ID, &v.Digest, &v.AuthorUserID, &v.AuthorUser, &prev, &message, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		if prev.Valid {
+			v.PreviousVersionID = &prev.Int64
+		}
+		if message.Valid {
+			v.Message = &message.String
+		}
+		versions = append(versions, v)
+	}
+	return versions, rows.Err()
+}
+
+func createAliasVersion(db *sql.DB, p Principal, ns AliasNamespace, path string, req AliasVersionCreateRequest) (AliasVersion, *AliasConflictResponse, error) {
+	if !validDigest(req.Digest) {
+		return AliasVersion{}, nil, fmt.Errorf("invalid digest")
+	}
+	exists, err := userHasCleanBlob(db, p.UserID, 0, req.Digest)
+	if err != nil {
+		return AliasVersion{}, nil, err
+	}
+	if !exists {
+		return AliasVersion{}, nil, fmt.Errorf("blob not found")
+	}
+	if err := requireAliasRole(db, ns, p.UserID, path, "write"); err != nil {
+		return AliasVersion{}, nil, err
+	}
+	if _, err := manifestForDigest(db, req.Digest); err != nil {
+		if err == sql.ErrNoRows {
+			return AliasVersion{}, nil, fmt.Errorf("blob not found")
+		}
+		return AliasVersion{}, nil, err
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return AliasVersion{}, nil, err
+	}
+	defer tx.Rollback()
+
+	var currentVersion int64
+	err = tx.QueryRow("SELECT current_version_id FROM aliases WHERE namespace_id = ? AND path = ?", ns.ID, path).Scan(&currentVersion)
+	if err == sql.ErrNoRows {
+		if req.ExpectedVersion != nil {
+			return AliasVersion{}, &AliasConflictResponse{Error: "alias conflict", CurrentVersion: 0}, nil
+		}
+	} else if err != nil {
+		return AliasVersion{}, nil, err
+	} else {
+		if req.ExpectedVersion == nil || *req.ExpectedVersion != currentVersion {
+			return AliasVersion{}, &AliasConflictResponse{Error: "alias conflict", CurrentVersion: currentVersion}, nil
+		}
+	}
+
+	var msg any
+	if strings.TrimSpace(req.Message) != "" {
+		msg = strings.TrimSpace(req.Message)
+	}
+	var prev any
+	if currentVersion != 0 {
+		prev = currentVersion
+	}
+	result, err := tx.Exec(`
+		INSERT INTO alias_versions (namespace_id, path, digest, author_user_id, previous_version_id, message)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, ns.ID, path, req.Digest, p.UserID, prev, msg)
+	if err != nil {
+		return AliasVersion{}, nil, err
+	}
+	versionID, err := result.LastInsertId()
+	if err != nil {
+		return AliasVersion{}, nil, err
+	}
+	if currentVersion == 0 {
+		if _, err := tx.Exec("INSERT INTO aliases (namespace_id, path, current_version_id) VALUES (?, ?, ?)", ns.ID, path, versionID); err != nil {
+			return AliasVersion{}, nil, err
+		}
+	} else if _, err := tx.Exec("UPDATE aliases SET current_version_id = ?, updated_at = CURRENT_TIMESTAMP WHERE namespace_id = ? AND path = ?", versionID, ns.ID, path); err != nil {
+		return AliasVersion{}, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AliasVersion{}, nil, err
+	}
+	versions, err := aliasVersions(db, ns, p.UserID, path)
+	if err != nil {
+		return AliasVersion{}, nil, err
+	}
+	if len(versions) == 0 {
+		return AliasVersion{}, nil, sql.ErrNoRows
+	}
+	return versions[0], nil, nil
+}
+
+func upsertAliasGrant(db *sql.DB, ns AliasNamespace, p Principal, req AliasGrantRequest) (AliasGrant, error) {
+	grantPath, err := normalizeAliasGrantPath(req.Path)
+	if err != nil {
+		return AliasGrant{}, err
+	}
+	if err := requireAliasRole(db, ns, p.UserID, grantPath, "admin"); err != nil {
+		return AliasGrant{}, err
+	}
+	if err := validateAliasRole(req.Role); err != nil {
+		return AliasGrant{}, err
+	}
+	userID, err := userByName(db, req.User)
+	if err != nil {
+		return AliasGrant{}, err
+	}
+	_, err = db.Exec(`
+		INSERT INTO alias_grants (namespace_id, path, user_id, role)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(namespace_id, path, user_id) DO UPDATE SET role = excluded.role
+	`, ns.ID, grantPath, userID, req.Role)
+	if err != nil {
+		return AliasGrant{}, err
+	}
+	displayPath := grantPath
+	if displayPath == "" {
+		displayPath = "/"
+	}
+	return AliasGrant{Namespace: ns.Name, Path: displayPath, User: req.User, Role: req.Role}, nil
+}
+
+func deleteAliasGrant(db *sql.DB, ns AliasNamespace, p Principal, req AliasGrantRequest) error {
+	grantPath, err := normalizeAliasGrantPath(req.Path)
+	if err != nil {
+		return err
+	}
+	if err := requireAliasRole(db, ns, p.UserID, grantPath, "admin"); err != nil {
+		return err
+	}
+	userID, err := userByName(db, req.User)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec("DELETE FROM alias_grants WHERE namespace_id = ? AND path = ? AND user_id = ?", ns.ID, grantPath, userID)
+	return err
+}
+
 func userShelves(db *sql.DB, userID int64) ([]Shelf, error) {
 	rows, err := db.Query(`
 		SELECT
@@ -1689,6 +2141,242 @@ func handleShelves(db *sql.DB) http.HandlerFunc {
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	}
+}
+
+func aliasHTTPStatus(err error) int {
+	if err == sql.ErrNoRows {
+		return http.StatusNotFound
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "permission denied") {
+		return http.StatusForbidden
+	}
+	if strings.Contains(msg, "already exists") {
+		return http.StatusConflict
+	}
+	if strings.Contains(msg, "not found") {
+		return http.StatusNotFound
+	}
+	return http.StatusBadRequest
+}
+
+func handleAliasNamespaces(db *sql.DB, p Principal, w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		namespaces, err := userAliasNamespaces(db, p.UserID)
+		if err != nil {
+			http.Error(w, "failed to list alias namespaces", http.StatusInternalServerError)
+			return
+		}
+		if namespaces == nil {
+			namespaces = []AliasNamespace{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(AliasNamespaceListResponse{Namespaces: namespaces})
+	case http.MethodPost:
+		defer r.Body.Close()
+		var req AliasNamespaceCreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad alias namespace request", http.StatusBadRequest)
+			return
+		}
+		ns, err := createAliasNamespace(db, p, req)
+		if err != nil {
+			http.Error(w, err.Error(), aliasHTTPStatus(err))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(ns)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleAliasGrantPath(db *sql.DB, p Principal, ns AliasNamespace, w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	var req AliasGrantRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad alias grant request", http.StatusBadRequest)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		grant, err := upsertAliasGrant(db, ns, p, req)
+		if err != nil {
+			http.Error(w, err.Error(), aliasHTTPStatus(err))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(AliasGrantResponse{Grant: grant})
+	case http.MethodDelete:
+		if err := deleteAliasGrant(db, ns, p, req); err != nil {
+			http.Error(w, err.Error(), aliasHTTPStatus(err))
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func handleAliasBlobGet(db *sql.DB, p Principal, ns AliasNamespace, path string, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	alias, err := getAlias(db, ns, p.UserID, path)
+	if err != nil {
+		http.Error(w, err.Error(), aliasHTTPStatus(err))
+		return
+	}
+	manifest, err := manifestForDigest(db, alias.Digest)
+	if err != nil {
+		http.Error(w, "blob not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(manifest.Size, 10))
+	if r.Method == http.MethodHead {
+		return
+	}
+	if err := copyManifestBlob(w, manifest); err != nil {
+		http.Error(w, "failed to read blob", http.StatusInternalServerError)
+	}
+}
+
+func handleAliasPath(db *sql.DB, p Principal, w http.ResponseWriter, r *http.Request) {
+	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/alias/"), "/")
+	if trimmed == "" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	parts := strings.Split(trimmed, "/")
+	nsName := parts[0]
+	if err := validateAliasNamespaceName(nsName); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	ns, err := aliasNamespaceByName(db, nsName)
+	if err != nil {
+		http.Error(w, "alias namespace not found", http.StatusNotFound)
+		return
+	}
+
+	if len(parts) == 2 && parts[1] == "grants" {
+		handleAliasGrantPath(db, p, ns, w, r)
+		return
+	}
+
+	if len(parts) == 1 {
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		prefix := strings.TrimSpace(r.URL.Query().Get("prefix"))
+		if prefix != "" {
+			prefix, err = normalizeAliasGrantPath(prefix)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		aliases, err := listAliases(db, ns, p.UserID, prefix)
+		if err != nil {
+			http.Error(w, err.Error(), aliasHTTPStatus(err))
+			return
+		}
+		if aliases == nil {
+			aliases = []Alias{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(AliasListResponse{Aliases: aliases})
+		return
+	}
+
+	if len(parts) >= 3 && parts[len(parts)-1] == "versions" {
+		path, err := normalizeAliasPath(strings.Join(parts[1:len(parts)-1], "/"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			versions, err := aliasVersions(db, ns, p.UserID, path)
+			if err != nil {
+				http.Error(w, err.Error(), aliasHTTPStatus(err))
+				return
+			}
+			if versions == nil {
+				versions = []AliasVersion{}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(AliasVersionListResponse{Versions: versions})
+		case http.MethodPost:
+			defer r.Body.Close()
+			var req AliasVersionCreateRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "bad alias version request", http.StatusBadRequest)
+				return
+			}
+			version, conflict, err := createAliasVersion(db, p, ns, path, req)
+			if conflict != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(conflict)
+				return
+			}
+			if err != nil {
+				http.Error(w, err.Error(), aliasHTTPStatus(err))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(version)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+		return
+	}
+
+	if len(parts) >= 3 && parts[len(parts)-1] == "blob" {
+		path, err := normalizeAliasPath(strings.Join(parts[1:len(parts)-1], "/"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		handleAliasBlobGet(db, p, ns, path, w, r)
+		return
+	}
+
+	path, err := normalizeAliasPath(strings.Join(parts[1:], "/"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	alias, err := getAlias(db, ns, p.UserID, path)
+	if err != nil {
+		http.Error(w, err.Error(), aliasHTTPStatus(err))
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(alias)
+}
+
+func handleAliases(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		p := getPrincipal(r)
+		if r.URL.Path == "/alias/namespaces" {
+			handleAliasNamespaces(db, p, w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/alias/") {
+			handleAliasPath(db, p, w, r)
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
 	}
 }
 
@@ -2109,6 +2797,47 @@ CREATE TABLE IF NOT EXISTS upload_session_chunks (
 	FOREIGN KEY(user_id, shelf_id, digest) REFERENCES upload_sessions(user_id, shelf_id, digest)
 );
 CREATE INDEX IF NOT EXISTS upload_session_chunks_digest ON upload_session_chunks(digest);
+
+CREATE TABLE IF NOT EXISTS alias_namespaces (
+	id INTEGER PRIMARY KEY,
+	name TEXT NOT NULL UNIQUE,
+	owner_user_id INTEGER NOT NULL,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY(owner_user_id) REFERENCES users(id)
+);
+CREATE TABLE IF NOT EXISTS alias_grants (
+	namespace_id INTEGER NOT NULL,
+	path TEXT NOT NULL,
+	user_id INTEGER NOT NULL,
+	role TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (namespace_id, path, user_id),
+	FOREIGN KEY(namespace_id) REFERENCES alias_namespaces(id),
+	FOREIGN KEY(user_id) REFERENCES users(id)
+);
+CREATE INDEX IF NOT EXISTS alias_grants_user_id ON alias_grants(user_id);
+CREATE TABLE IF NOT EXISTS aliases (
+	namespace_id INTEGER NOT NULL,
+	path TEXT NOT NULL,
+	current_version_id INTEGER NOT NULL,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	PRIMARY KEY (namespace_id, path),
+	FOREIGN KEY(namespace_id) REFERENCES alias_namespaces(id)
+);
+CREATE TABLE IF NOT EXISTS alias_versions (
+	id INTEGER PRIMARY KEY,
+	namespace_id INTEGER NOT NULL,
+	path TEXT NOT NULL,
+	digest TEXT NOT NULL,
+	author_user_id INTEGER NOT NULL,
+	previous_version_id INTEGER,
+	message TEXT,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY(namespace_id) REFERENCES alias_namespaces(id),
+	FOREIGN KEY(author_user_id) REFERENCES users(id),
+	FOREIGN KEY(previous_version_id) REFERENCES alias_versions(id)
+);
+CREATE INDEX IF NOT EXISTS alias_versions_namespace_path ON alias_versions(namespace_id, path);
 `, defaultUserMaxBytes, defaultUserMaxPendingBytes, defaultMaxSimpleUploadBytes))
 	if err != nil {
 		log.Fatal(err)
@@ -2135,8 +2864,25 @@ CREATE INDEX IF NOT EXISTS upload_session_chunks_digest ON upload_session_chunks
 	if err := migrateShelves(db); err != nil {
 		log.Fatal(err)
 	}
+	if err := migrateAliases(db); err != nil {
+		log.Fatal(err)
+	}
 
 	return db
+}
+
+func migrateAliases(db *sql.DB) error {
+	if _, err := db.Exec(`
+INSERT OR IGNORE INTO alias_namespaces (name, owner_user_id)
+SELECT name, id FROM users;
+INSERT OR IGNORE INTO alias_grants (namespace_id, path, user_id, role)
+SELECT alias_namespaces.id, '', users.id, 'admin'
+FROM users
+JOIN alias_namespaces ON alias_namespaces.name = users.name;
+`); err != nil {
+		return err
+	}
+	return nil
 }
 
 func migrateShelves(db *sql.DB) error {
@@ -2359,6 +3105,8 @@ func main() {
 	mux.HandleFunc("/uploads", requirePrincipal(db, handleUploadsPost(db)))
 	mux.HandleFunc("/shelves", requirePrincipal(db, handleShelves(db)))
 	mux.HandleFunc("/shelves/", requirePrincipal(db, handleShelves(db)))
+	mux.HandleFunc("/alias", requirePrincipal(db, handleAliases(db)))
+	mux.HandleFunc("/alias/", requirePrincipal(db, handleAliases(db)))
 
 	mux.HandleFunc("/quota", requirePrincipal(db, func(w http.ResponseWriter, r *http.Request) {
 		handleQuotaGet(db, w, r)

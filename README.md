@@ -77,29 +77,41 @@ command="sht-shell id 1" ssh-ed25519 AAAA...
 
 Do not use a global `ForceCommand` for this wrapper. The wrapper expects the key ID in its own command arguments and reads the user's requested command from `SSH_ORIGINAL_COMMAND`.
 
-Supported SSH commands:
+Supported SSH commands. Add `-j` anywhere after the remote command to force JSON output, for example `sht -- -j`, `sht list -j`, or `sht shelf list -j`.
 
 ```bash
-sht               # upload stdin
-sht cat [<digest> ...]      # print blobs; reads whitespace-delimited digests from stdin when none are given
-sht stat [<digest> ...]     # check blobs; reads whitespace-delimited digests from stdin when none are given
-sht release [<digest> ...]  # release blob access; reads whitespace-delimited digests from stdin when none are given
-sht list [-dhskcta] # list refs from all shelves; d=digest, h=shelf, s=size, k=key_id, c=created_at, t=state, a=all
+sht                       # upload stdin to default shelf
+sht <shelf>               # upload stdin to shelf
+sht --                    # upload stdin to default shelf
+sht <shelf> --            # upload stdin to shelf
+sht <command> [args...]
+
+sht cat [digest ...]      # print blobs
+sht stat [digest ...]     # show blob status
+sht release [digest ...]  # release blobs
+sht list [fields]         # list refs
+sht quota                 # show quota usage
+sht alias ns list         # list alias namespaces
+sht alias ns create <name>
+sht alias list <namespace> [prefix]
+sht alias get <namespace> <path>
+sht alias cat <namespace> <path>
+sht alias set <namespace> <path> <digest> [--expect <version>] [-m <message>]
+sht alias history <namespace> <path>
+sht alias grant <namespace> <path> <user> <read|write|admin>
+sht alias revoke <namespace> <path> <user>
 sht shelf list
-sht shelf create <name> <max_bytes> <max_pending_bytes>
+sht shelf create <name> <max> [pending-max]
 sht shelf rename <old> <new>
-sht shelf set-default <name>
+sht shelf default <name>
 sht shelf delete <name> --force
-sht <shelf>                # upload stdin to a shelf
-sht <shelf> list [-dhskcta]
-sht <shelf> release [<digest> ...]
-sht <shelf> manifest < manifest.json
-sht <shelf> upload <digest> <index> < chunk.bin
-sht <shelf> status <digest>
-sht <shelf> finalize <digest>
-sht manifest < manifest.json
-sht upload <digest> <index> < chunk.bin
-sht status <digest>
-sht finalize <digest>
-sht help          # show usage
+sht manifest              # create/resume upload from manifest JSON
+sht upload <id> <index>   # upload chunk bytes
+sht status <id>           # show upload status
+sht finalize <id>         # finalize upload
+sht help [topic]          # show usage
 ```
+
+Digest commands read whitespace-delimited digests from stdin when none are given. `sht help list`, `sht help shelf`, `sht help alias`, and `sht help upload` show detailed topic help.
+
+Alias namespaces are shared spaces for versioned names that point at blobs. Grants are recursive by alias path, so granting `write` on `docs` lets that user update aliases under `docs/...`. Updating an existing alias should pass `--expect <version>` to avoid overwriting someone else's newer commit.

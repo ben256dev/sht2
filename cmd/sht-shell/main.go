@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,100 +23,174 @@ func getenv(key, fallback string) string {
 }
 
 var (
-	sockDir = getenv("SHT_SOCK_DIR", "/run/sht/sht.sock")
+	sockDir  = getenv("SHT_SOCK_DIR", "/run/sht/sht.sock")
+	jsonMode bool
 )
 
+func mainUsageText() string {
+	return strings.Join([]string{
+		"usage:",
+		"  sht                       upload stdin to default shelf",
+		"  sht <shelf>               upload stdin to shelf",
+		"  sht --                    upload stdin to default shelf",
+		"  sht <shelf> --            upload stdin to shelf",
+		"  sht <command> [args...]",
+		"",
+		"commands:",
+		"  cat [digest ...]          print blobs",
+		"  stat [digest ...]         show blob status",
+		"  release [digest ...]      release blobs",
+		"  list [fields]             list refs",
+		"  quota                     show quota usage",
+		"  shelf <command>           manage shelves",
+		"  alias <command>           manage aliases",
+		"  upload <command>          resumable uploads",
+		"  help [topic]              show help",
+		"",
+		"digest commands read digests from stdin when none are given.",
+	}, "\n")
+}
+
+func catUsageText() string {
+	return strings.Join([]string{
+		"usage:",
+		"  sht cat [digest ...]",
+		"",
+		"Print blobs for whitespace-delimited digests.",
+		"When no digests are given as arguments, digests are read from stdin.",
+	}, "\n")
+}
+
+func statUsageText() string {
+	return strings.Join([]string{
+		"usage:",
+		"  sht stat [digest ...]",
+		"",
+		"Check blobs for whitespace-delimited digests.",
+		"When no digests are given as arguments, digests are read from stdin.",
+	}, "\n")
+}
+
+func releaseUsageText() string {
+	return strings.Join([]string{
+		"usage:",
+		"  sht release [digest ...]",
+		"",
+		"Release refs for whitespace-delimited digests.",
+		"When no digests are given as arguments, digests are read from stdin.",
+	}, "\n")
+}
+
+func shelfUsageText() string {
+	return strings.Join([]string{
+		"usage:",
+		"  sht shelf list",
+		"  sht shelf create <name> <max> [pending-max]",
+		"  sht shelf rename <old> <new>",
+		"  sht shelf default <name>",
+		"  sht shelf delete <name> --force",
+		"",
+		"Creating a non-default shelf enables multi-shelf mode.",
+		"After that, scoped commands use the shelf name as the first word:",
+		"  sht <shelf>",
+		"  sht <shelf> --",
+		"  sht <shelf> list [fields]",
+		"  sht <shelf> release [digest ...]",
+	}, "\n")
+}
+
+func listUsageText() string {
+	return strings.Join([]string{
+		"usage:",
+		"  sht list [fields]",
+		"",
+		"fields:",
+		"  d  digest",
+		"  h  shelf",
+		"  s  size",
+		"  k  key id",
+		"  c  created at",
+		"  t  state",
+		"  a  all (default)",
+		"",
+		"examples:",
+		"  sht list",
+		"  sht list d",
+		"  sht list dht",
+		"  sht <shelf> list dt",
+	}, "\n")
+}
+
+func uploadUsageText() string {
+	return strings.Join([]string{
+		"usage:",
+		"  sht manifest              create/resume upload from manifest JSON",
+		"  sht upload <id> <index>   upload chunk bytes",
+		"  sht status <id>           show upload status",
+		"  sht finalize <id>         finalize upload",
+		"",
+		"Pipe the manifest JSON to stdin for 'manifest'.",
+		"Pipe chunk bytes to stdin for 'upload'.",
+	}, "\n")
+}
+
+func aliasUsageText() string {
+	return strings.Join([]string{
+		"usage:",
+		"  sht alias ns list",
+		"  sht alias ns create <name>",
+		"  sht alias list <namespace> [prefix]",
+		"  sht alias get <namespace> <path>",
+		"  sht alias cat <namespace> <path>",
+		"  sht alias set <namespace> <path> <digest> [--expect <version>] [-m <message>]",
+		"  sht alias history <namespace> <path>",
+		"  sht alias grant <namespace> <path> <user> <read|write|admin>",
+		"  sht alias revoke <namespace> <path> <user>",
+		"",
+		"Aliases are versioned names for blobs. Grants apply recursively to a directory path.",
+		"Use / as the path when granting or revoking namespace-wide access.",
+	}, "\n")
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sht                       upload stdin to default shelf")
-	fmt.Fprintln(os.Stderr, "  sht <shelf>               upload stdin to shelf")
-	fmt.Fprintln(os.Stderr, "  sht <command> [args...]")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "commands:")
-	fmt.Fprintln(os.Stderr, "  cat [digest ...]          print blobs")
-	fmt.Fprintln(os.Stderr, "  stat [digest ...]         show blob status")
-	fmt.Fprintln(os.Stderr, "  release [digest ...]      release blobs")
-	fmt.Fprintln(os.Stderr, "  list [fields]             list refs")
-	fmt.Fprintln(os.Stderr, "  quota                     show quota usage")
-	fmt.Fprintln(os.Stderr, "  shelf <command>           manage shelves")
-	fmt.Fprintln(os.Stderr, "  upload <command>          resumable uploads")
-	fmt.Fprintln(os.Stderr, "  help [topic]              show help")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "digest commands read digests from stdin when none are given.")
+	printUsage("main", mainUsageText())
 }
 
 func catUsage() {
-	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sht cat [<digest> ...]")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Print blobs for whitespace-delimited digests.")
-	fmt.Fprintln(os.Stderr, "When no digests are given as arguments, digests are read from stdin.")
+	printUsage("cat", catUsageText())
 }
 
 func statUsage() {
-	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sht stat [<digest> ...]")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Check blobs for whitespace-delimited digests.")
-	fmt.Fprintln(os.Stderr, "When no digests are given as arguments, digests are read from stdin.")
+	printUsage("stat", statUsageText())
 }
 
 func releaseUsage() {
-	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sht release [<digest> ...]")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Release refs for whitespace-delimited digests.")
-	fmt.Fprintln(os.Stderr, "When no digests are given as arguments, digests are read from stdin.")
+	printUsage("release", releaseUsageText())
 }
 
 func shelfUsage() {
-	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sht shelf list")
-	fmt.Fprintln(os.Stderr, "  sht shelf create <name> <max> [pending-max]")
-	fmt.Fprintln(os.Stderr, "  sht shelf rename <old> <new>")
-	fmt.Fprintln(os.Stderr, "  sht shelf default <name>")
-	fmt.Fprintln(os.Stderr, "  sht shelf delete <name> --force")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Creating a non-default shelf enables multi-shelf mode.")
-	fmt.Fprintln(os.Stderr, "After that, scoped commands use the shelf name as the first word:")
-	fmt.Fprintln(os.Stderr, "  sht <shelf>")
-	fmt.Fprintln(os.Stderr, "  sht <shelf> list [fields]")
-	fmt.Fprintln(os.Stderr, "  sht <shelf> release [digest ...]")
+	printUsage("shelf", shelfUsageText())
 }
 
 func listUsage() {
-	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sht list [fields]")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "fields:")
-	fmt.Fprintln(os.Stderr, "  d  digest")
-	fmt.Fprintln(os.Stderr, "  h  shelf")
-	fmt.Fprintln(os.Stderr, "  s  size")
-	fmt.Fprintln(os.Stderr, "  k  key id")
-	fmt.Fprintln(os.Stderr, "  c  created at")
-	fmt.Fprintln(os.Stderr, "  t  state")
-	fmt.Fprintln(os.Stderr, "  a  all (default)")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "examples:")
-	fmt.Fprintln(os.Stderr, "  sht list")
-	fmt.Fprintln(os.Stderr, "  sht list d")
-	fmt.Fprintln(os.Stderr, "  sht list dht")
-	fmt.Fprintln(os.Stderr, "  sht <shelf> list dt")
+	printUsage("list", listUsageText())
 }
 
 func uploadUsage() {
-	fmt.Fprintln(os.Stderr, "usage:")
-	fmt.Fprintln(os.Stderr, "  sht manifest              create/resume upload from manifest JSON")
-	fmt.Fprintln(os.Stderr, "  sht upload <id> <index>   upload chunk bytes")
-	fmt.Fprintln(os.Stderr, "  sht status <id>           show upload status")
-	fmt.Fprintln(os.Stderr, "  sht finalize <id>         finalize upload")
-	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Pipe the manifest JSON to stdin for 'manifest'.")
-	fmt.Fprintln(os.Stderr, "Pipe chunk bytes to stdin for 'upload'.")
+	printUsage("upload", uploadUsageText())
+}
+
+func aliasUsage() {
+	printUsage("alias", aliasUsageText())
 }
 
 func die(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, format+"\n", args...)
+	message := fmt.Sprintf(format, args...)
+	if jsonMode {
+		printJSONError(message, "error", 0)
+	} else {
+		fmt.Fprintln(os.Stderr, message)
+	}
 	os.Exit(1)
 }
 
@@ -193,6 +267,141 @@ type ShelfRenameRequest struct {
 	Name string `json:"name"`
 }
 
+type ErrorDetail struct {
+	Message string `json:"message"`
+	Code    string `json:"code,omitempty"`
+	Status  int    `json:"status,omitempty"`
+}
+
+type ErrorResponse struct {
+	Error ErrorDetail `json:"error"`
+}
+
+type UsageResponse struct {
+	Topic string `json:"topic"`
+	Usage string `json:"usage"`
+}
+
+type BlobResultError struct {
+	Message string `json:"message"`
+	Status  int    `json:"status,omitempty"`
+}
+
+type CatResult struct {
+	Digest        string           `json:"digest"`
+	Size          int64            `json:"size,omitempty"`
+	ContentBase64 string           `json:"content_base64,omitempty"`
+	Error         *BlobResultError `json:"error,omitempty"`
+}
+
+type CatResponse struct {
+	Blobs []CatResult `json:"blobs"`
+}
+
+type StatResult struct {
+	Digest string           `json:"digest"`
+	Exists bool             `json:"exists"`
+	Status int              `json:"status"`
+	Error  *BlobResultError `json:"error,omitempty"`
+}
+
+type StatResponse struct {
+	Results []StatResult `json:"results"`
+}
+
+type ReleaseResult struct {
+	Digest   string           `json:"digest"`
+	Released bool             `json:"released"`
+	Status   int              `json:"status"`
+	Error    *BlobResultError `json:"error,omitempty"`
+}
+
+type ReleaseResponse struct {
+	Results []ReleaseResult `json:"results"`
+}
+
+type ShelfDeleteResponse struct {
+	Deleted bool   `json:"deleted"`
+	Name    string `json:"name"`
+}
+
+type AliasNamespace struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	OwnerID int64  `json:"owner_user_id"`
+}
+
+type AliasNamespaceListResponse struct {
+	Namespaces []AliasNamespace `json:"namespaces"`
+}
+
+type AliasNamespaceCreateRequest struct {
+	Name string `json:"name"`
+}
+
+type AliasGrant struct {
+	Namespace string `json:"namespace,omitempty"`
+	Path      string `json:"path"`
+	User      string `json:"user"`
+	Role      string `json:"role"`
+}
+
+type AliasGrantRequest struct {
+	Path string `json:"path"`
+	User string `json:"user"`
+	Role string `json:"role,omitempty"`
+}
+
+type AliasGrantResponse struct {
+	Grant AliasGrant `json:"grant"`
+}
+
+type AliasRevokeResponse struct {
+	Revoked   bool   `json:"revoked"`
+	Namespace string `json:"namespace"`
+	Path      string `json:"path"`
+	User      string `json:"user"`
+}
+
+type Alias struct {
+	Namespace        string `json:"namespace"`
+	Path             string `json:"path"`
+	Digest           string `json:"digest"`
+	CurrentVersionID int64  `json:"current_version_id"`
+	UpdatedAt        string `json:"updated_at"`
+}
+
+type AliasListResponse struct {
+	Aliases []Alias `json:"aliases"`
+}
+
+type AliasVersion struct {
+	ID                int64  `json:"id"`
+	Namespace         string `json:"namespace"`
+	Path              string `json:"path"`
+	Digest            string `json:"digest"`
+	AuthorUserID      int64  `json:"author_user_id"`
+	AuthorUser        string `json:"author_user"`
+	PreviousVersionID *int64 `json:"previous_version_id,omitempty"`
+	Message           string `json:"message,omitempty"`
+	CreatedAt         string `json:"created_at"`
+}
+
+type AliasVersionListResponse struct {
+	Versions []AliasVersion `json:"versions"`
+}
+
+type AliasVersionCreateRequest struct {
+	Digest          string `json:"digest"`
+	ExpectedVersion *int64 `json:"expected_version,omitempty"`
+	Message         string `json:"message,omitempty"`
+}
+
+type AliasConflictResponse struct {
+	Error          string `json:"error"`
+	CurrentVersion int64  `json:"current_version"`
+}
+
 func newClient() *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -201,6 +410,76 @@ func newClient() *http.Client {
 			},
 		},
 	}
+}
+
+func printJSONTo(w io.Writer, value any) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, `{"error":{"message":"bad json response: %s","code":"error"}}`+"\n", err.Error())
+		os.Exit(1)
+	}
+	fmt.Fprintln(w, string(data))
+}
+
+func printJSONError(message, code string, status int) {
+	message = strings.TrimSpace(message)
+	if message == "" && status > 0 {
+		message = http.StatusText(status)
+	}
+	if code == "" {
+		code = "error"
+	}
+	printJSONTo(os.Stderr, ErrorResponse{Error: ErrorDetail{
+		Message: message,
+		Code:    code,
+		Status:  status,
+	}})
+}
+
+func printUsage(topic, text string) {
+	if jsonMode {
+		printJSONTo(os.Stdout, UsageResponse{Topic: topic, Usage: text})
+		return
+	}
+	fmt.Fprintln(os.Stderr, text)
+}
+
+func failIfErr(err error) {
+	if err != nil {
+		die("%v", err)
+	}
+}
+
+func splitJSONFlag(args []string) ([]string, bool) {
+	filtered := make([]string, 0, len(args))
+	found := false
+	for _, arg := range args {
+		if arg == "-j" {
+			found = true
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	return filtered, found
+}
+
+func httpErrorMessage(resp *http.Response) string {
+	data, _ := io.ReadAll(resp.Body)
+	message := strings.TrimSpace(string(data))
+	if message == "" {
+		message = http.StatusText(resp.StatusCode)
+	}
+	return message
+}
+
+func handleHTTPError(resp *http.Response) {
+	message := httpErrorMessage(resp)
+	if jsonMode {
+		printJSONError(message, http.StatusText(resp.StatusCode), resp.StatusCode)
+	} else {
+		fmt.Fprintln(os.Stderr, message)
+	}
+	os.Exit(1)
 }
 
 func collectDigests(args []string, command string) []string {
@@ -242,22 +521,17 @@ func store(keyID int64, shelf string) {
 	client := newClient()
 
 	req, err := http.NewRequest(http.MethodPost, "http://sht/blob", os.Stdin)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 	setShelfHeader(req, shelf)
 
 	resp, err := client.Do(req)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(os.Stderr, resp.Body)
-		os.Exit(1)
+		handleHTTPError(resp)
 	}
 
 	var out StoreBlobResponse
@@ -265,21 +539,21 @@ func store(keyID int64, shelf string) {
 		die("bad response: %v", err)
 	}
 
+	if jsonMode {
+		printJSON(out)
+		return
+	}
 	fmt.Println(out.Digest)
 }
 
 func catOne(client *http.Client, digest string, keyID int64) bool {
 	req, err := http.NewRequest(http.MethodGet, "http://sht/blob/"+digest, nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 
 	resp, err := client.Do(req)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -292,9 +566,58 @@ func catOne(client *http.Client, digest string, keyID int64) bool {
 	return true
 }
 
+func catOneJSON(client *http.Client, digest string, keyID int64) (CatResult, bool) {
+	req, err := http.NewRequest(http.MethodGet, "http://sht/blob/"+digest, nil)
+	failIfErr(err)
+
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	resp, err := client.Do(req)
+	failIfErr(err)
+	defer resp.Body.Close()
+
+	data, err := io.ReadAll(resp.Body)
+	failIfErr(err)
+	if resp.StatusCode != http.StatusOK {
+		message := strings.TrimSpace(string(data))
+		if message == "" {
+			message = http.StatusText(resp.StatusCode)
+		}
+		return CatResult{
+			Digest: digest,
+			Error: &BlobResultError{
+				Message: message,
+				Status:  resp.StatusCode,
+			},
+		}, false
+	}
+
+	return CatResult{
+		Digest:        digest,
+		Size:          int64(len(data)),
+		ContentBase64: base64.StdEncoding.EncodeToString(data),
+	}, true
+}
+
 func cat(digests []string, keyID int64) {
 	client := newClient()
 	ok := true
+	if jsonMode {
+		results := make([]CatResult, 0, len(digests))
+		for _, digest := range digests {
+			result, resultOK := catOneJSON(client, digest, keyID)
+			results = append(results, result)
+			if !resultOK {
+				ok = false
+			}
+		}
+		printJSON(CatResponse{Blobs: results})
+		if !ok {
+			os.Exit(1)
+		}
+		return
+	}
+
 	for _, digest := range digests {
 		if !catOne(client, digest, keyID) {
 			ok = false
@@ -327,12 +650,35 @@ func stat(digests []string, keyID int64) {
 	client := newClient()
 	multiple := len(digests) > 1
 	ok := true
+	if jsonMode {
+		results := make([]StatResult, 0, len(digests))
+		for _, digest := range digests {
+			code, err := statOne(client, digest, keyID)
+			failIfErr(err)
+			result := StatResult{
+				Digest: digest,
+				Exists: code == http.StatusOK,
+				Status: code,
+			}
+			if code != http.StatusOK {
+				ok = false
+				result.Error = &BlobResultError{
+					Message: http.StatusText(code),
+					Status:  code,
+				}
+			}
+			results = append(results, result)
+		}
+		printJSON(StatResponse{Results: results})
+		if !ok {
+			os.Exit(1)
+		}
+		return
+	}
 
 	for _, digest := range digests {
 		code, err := statOne(client, digest, keyID)
-		if err != nil {
-			log.Fatal(err)
-		}
+		failIfErr(err)
 		switch code {
 		case http.StatusOK:
 			if multiple {
@@ -362,10 +708,10 @@ func stat(digests []string, keyID int64) {
 	}
 }
 
-func releaseOne(client *http.Client, digest string, keyID int64, shelf string) (int, error) {
+func releaseOne(client *http.Client, digest string, keyID int64, shelf string) (int, string, error) {
 	req, err := http.NewRequest(http.MethodDelete, "http://sht/blob/"+digest, nil)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
@@ -373,23 +719,53 @@ func releaseOne(client *http.Client, digest string, keyID int64, shelf string) (
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 	defer resp.Body.Close()
 
-	return resp.StatusCode, nil
+	message := ""
+	if resp.StatusCode != http.StatusNoContent {
+		message = httpErrorMessage(resp)
+	}
+	return resp.StatusCode, message, nil
 }
 
 func release(digests []string, keyID int64, shelf string) {
 	client := newClient()
 	multiple := len(digests) > 1
 	ok := true
+	if jsonMode {
+		results := make([]ReleaseResult, 0, len(digests))
+		for _, digest := range digests {
+			code, message, err := releaseOne(client, digest, keyID, shelf)
+			failIfErr(err)
+			result := ReleaseResult{
+				Digest:   digest,
+				Released: code == http.StatusNoContent,
+				Status:   code,
+			}
+			if code != http.StatusNoContent {
+				ok = false
+				if message == "" {
+					message = http.StatusText(code)
+				}
+				result.Error = &BlobResultError{
+					Message: message,
+					Status:  code,
+				}
+			}
+			results = append(results, result)
+		}
+		printJSON(ReleaseResponse{Results: results})
+		if !ok {
+			os.Exit(1)
+		}
+		return
+	}
 
 	for _, digest := range digests {
-		code, err := releaseOne(client, digest, keyID, shelf)
-		if err != nil {
-			log.Fatal(err)
-		}
+		code, message, err := releaseOne(client, digest, keyID, shelf)
+		failIfErr(err)
 		switch code {
 		case http.StatusNoContent:
 			if multiple {
@@ -398,17 +774,23 @@ func release(digests []string, keyID int64, shelf string) {
 				fmt.Println("released")
 			}
 		case http.StatusNotFound:
+			if message == "" {
+				message = "not found"
+			}
 			if multiple {
-				fmt.Fprintln(os.Stderr, digest, "not found")
+				fmt.Fprintln(os.Stderr, digest, message)
 			} else {
-				fmt.Fprintln(os.Stderr, "not found")
+				fmt.Fprintln(os.Stderr, message)
 			}
 			ok = false
 		default:
+			if message == "" {
+				message = http.StatusText(code)
+			}
 			if multiple {
-				fmt.Fprintln(os.Stderr, digest, http.StatusText(code))
+				fmt.Fprintln(os.Stderr, digest, message)
 			} else {
-				fmt.Fprintln(os.Stderr, code)
+				fmt.Fprintln(os.Stderr, message)
 			}
 			ok = false
 		}
@@ -532,22 +914,17 @@ func refs(keyID int64, fields string, shelf string) {
 	client := newClient()
 
 	req, err := http.NewRequest(http.MethodGet, "http://sht/refs", nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 	setShelfHeader(req, shelf)
 
 	resp, err := client.Do(req)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(os.Stderr, resp.Body)
-		os.Exit(1)
+		handleHTTPError(resp)
 	}
 
 	var out ListRefsResponse
@@ -555,6 +932,10 @@ func refs(keyID int64, fields string, shelf string) {
 		die("bad response: %v", err)
 	}
 
+	if jsonMode {
+		printJSON(out)
+		return
+	}
 	dimDirty := stdoutIsTerminal()
 	lines := formatRefRows(out.Refs, fields)
 	for i, ref := range out.Refs {
@@ -565,14 +946,11 @@ func refs(keyID int64, fields string, shelf string) {
 func doUploadRequest(req *http.Request, out any) {
 	client := newClient()
 	resp, err := client.Do(req)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		io.Copy(os.Stderr, resp.Body)
-		os.Exit(1)
+		handleHTTPError(resp)
 	}
 
 	if out == nil {
@@ -584,18 +962,12 @@ func doUploadRequest(req *http.Request, out any) {
 }
 
 func printJSON(value any) {
-	data, err := json.Marshal(value)
-	if err != nil {
-		die("bad response: %v", err)
-	}
-	fmt.Println(string(data))
+	printJSONTo(os.Stdout, value)
 }
 
 func manifest(keyID int64, shelf string) {
 	req, err := http.NewRequest(http.MethodPost, "http://sht/uploads", os.Stdin)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 	setShelfHeader(req, shelf)
 	req.Header.Set("Content-Type", "application/json")
@@ -615,9 +987,7 @@ func uploadChunk(keyID int64, args []string, shelf string) {
 	}
 
 	req, err := http.NewRequest(http.MethodPut, fmt.Sprintf("http://sht/uploads/%s/chunks/%d", args[0], index), os.Stdin)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 	setShelfHeader(req, shelf)
 
@@ -631,9 +1001,7 @@ func uploadStatus(keyID int64, args []string, shelf string) {
 		die("usage: sht status <digest>")
 	}
 	req, err := http.NewRequest(http.MethodGet, "http://sht/uploads/"+args[0], nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 	setShelfHeader(req, shelf)
 
@@ -647,14 +1015,16 @@ func finalize(keyID int64, args []string, shelf string) {
 		die("usage: sht finalize <digest>")
 	}
 	req, err := http.NewRequest(http.MethodPost, "http://sht/uploads/"+args[0]+"/finalize", nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 	setShelfHeader(req, shelf)
 
 	var out StoreBlobResponse
 	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
 	fmt.Println(out.Digest)
 }
 
@@ -663,13 +1033,15 @@ func quota(keyID int64, args []string) {
 		die("usage: sht quota")
 	}
 	req, err := http.NewRequest(http.MethodGet, "http://sht/quota", nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 
 	var out QuotaResponse
 	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
 	rows := [][]string{
 		{"live", fmt.Sprintf("%d/%d", out.UsedBytes, out.MaxBytes)},
 		{"pending", fmt.Sprintf("%d/%d", out.PendingBytes, out.MaxPendingBytes)},
@@ -689,13 +1061,15 @@ func quota(keyID int64, args []string) {
 
 func shelfList(keyID int64) {
 	req, err := http.NewRequest(http.MethodGet, "http://sht/shelves", nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 
 	var out ShelfListResponse
 	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
 	rows := make([][]string, 0, len(out.Shelves))
 	widths := make([]int, 6)
 	for _, shelf := range out.Shelves {
@@ -732,34 +1106,37 @@ func shelfList(keyID int64) {
 }
 
 func shelfCreate(keyID int64, args []string) {
-	if len(args) != 3 {
-		die("usage: sht shelf create <name> <max_bytes> <max_pending_bytes>")
+	if len(args) != 2 && len(args) != 3 {
+		die("usage: sht shelf create <name> <max> [pending-max]")
 	}
 	maxBytes, err := strconv.ParseInt(args[1], 10, 64)
 	if err != nil || maxBytes <= 0 {
 		die("invalid max_bytes")
 	}
-	maxPendingBytes, err := strconv.ParseInt(args[2], 10, 64)
-	if err != nil || maxPendingBytes <= 0 {
-		die("invalid max_pending_bytes")
+	maxPendingBytes := maxBytes * 5 / 4
+	if len(args) == 3 {
+		maxPendingBytes, err = strconv.ParseInt(args[2], 10, 64)
+		if err != nil || maxPendingBytes <= 0 {
+			die("invalid max_pending_bytes")
+		}
 	}
 	body, err := json.Marshal(ShelfCreateRequest{
 		Name:            args[0],
 		MaxBytes:        maxBytes,
 		MaxPendingBytes: maxPendingBytes,
 	})
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req, err := http.NewRequest(http.MethodPost, "http://sht/shelves", strings.NewReader(string(body)))
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 	req.Header.Set("Content-Type", "application/json")
 
 	var out Shelf
 	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
 	fmt.Printf("%s %d %d enabled\n", out.Name, out.MaxBytes, out.MaxPendingBytes)
 }
 
@@ -768,18 +1145,18 @@ func shelfRename(keyID int64, args []string) {
 		die("usage: sht shelf rename <old> <new>")
 	}
 	body, err := json.Marshal(ShelfRenameRequest{Name: args[1]})
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req, err := http.NewRequest(http.MethodPatch, "http://sht/shelves/"+url.PathEscape(args[0]), strings.NewReader(string(body)))
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 	req.Header.Set("Content-Type", "application/json")
 
 	var out Shelf
 	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
 	state := "disabled"
 	if out.Enabled {
 		state = "enabled"
@@ -796,13 +1173,15 @@ func shelfSetDefault(keyID int64, args []string) {
 		die("usage: sht shelf default <name>")
 	}
 	req, err := http.NewRequest(http.MethodPost, "http://sht/shelves/"+url.PathEscape(args[0])+"/default", nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 
 	var out Shelf
 	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
 	fmt.Printf("%s default\n", out.Name)
 }
 
@@ -811,12 +1190,14 @@ func shelfDelete(keyID int64, args []string) {
 		die("usage: sht shelf delete <name> --force")
 	}
 	req, err := http.NewRequest(http.MethodDelete, "http://sht/shelves/"+url.PathEscape(args[0])+"?force=1", nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+	failIfErr(err)
 	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
 
 	doUploadRequest(req, nil)
+	if jsonMode {
+		printJSON(ShelfDeleteResponse{Deleted: true, Name: args[0]})
+		return
+	}
 	fmt.Println("deleted")
 }
 
@@ -847,13 +1228,490 @@ func shelfCommand(keyID int64, args []string) {
 	}
 }
 
-func commandArgs() []string {
-	return strings.Fields(os.Getenv("SSH_ORIGINAL_COMMAND"))
+func escapeAliasPath(path string) string {
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return ""
+	}
+	parts := strings.Split(path, "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
+}
+
+func aliasPathURL(namespace, path string, suffix ...string) string {
+	u := "http://sht/alias/" + url.PathEscape(namespace)
+	if escaped := escapeAliasPath(path); escaped != "" {
+		u += "/" + escaped
+	}
+	for _, part := range suffix {
+		u += "/" + url.PathEscape(part)
+	}
+	return u
+}
+
+func printAliasRows(aliases []Alias) {
+	rows := make([][]string, 0, len(aliases))
+	widths := make([]int, 5)
+	for _, alias := range aliases {
+		row := []string{
+			alias.Namespace,
+			alias.Path,
+			alias.Digest,
+			strconv.FormatInt(alias.CurrentVersionID, 10),
+			alias.UpdatedAt,
+		}
+		for i, value := range row {
+			if len(value) > widths[i] {
+				widths[i] = len(value)
+			}
+		}
+		rows = append(rows, row)
+	}
+	for _, row := range rows {
+		fmt.Printf("%-*s  %-*s  %-*s  %*s  %s\n", widths[0], row[0], widths[1], row[1], widths[2], row[2], widths[3], row[3], row[4])
+	}
+}
+
+func aliasNamespaceList(keyID int64) {
+	req, err := http.NewRequest(http.MethodGet, "http://sht/alias/namespaces", nil)
+	failIfErr(err)
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	var out AliasNamespaceListResponse
+	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
+	for _, ns := range out.Namespaces {
+		fmt.Printf("%s %d\n", ns.Name, ns.OwnerID)
+	}
+}
+
+func aliasNamespaceCreate(keyID int64, args []string) {
+	if len(args) != 1 {
+		die("usage: sht alias ns create <name>")
+	}
+	body, err := json.Marshal(AliasNamespaceCreateRequest{Name: args[0]})
+	failIfErr(err)
+	req, err := http.NewRequest(http.MethodPost, "http://sht/alias/namespaces", strings.NewReader(string(body)))
+	failIfErr(err)
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	req.Header.Set("Content-Type", "application/json")
+
+	var out AliasNamespace
+	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
+	fmt.Printf("%s %d\n", out.Name, out.OwnerID)
+}
+
+func aliasList(keyID int64, args []string) {
+	if len(args) != 1 && len(args) != 2 {
+		die("usage: sht alias list <namespace> [prefix]")
+	}
+	u := "http://sht/alias/" + url.PathEscape(args[0])
+	if len(args) == 2 {
+		q := url.Values{}
+		q.Set("prefix", args[1])
+		u += "?" + q.Encode()
+	}
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	failIfErr(err)
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	var out AliasListResponse
+	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
+	printAliasRows(out.Aliases)
+}
+
+func aliasGet(keyID int64, args []string) {
+	if len(args) != 2 {
+		die("usage: sht alias get <namespace> <path>")
+	}
+	req, err := http.NewRequest(http.MethodGet, aliasPathURL(args[0], args[1]), nil)
+	failIfErr(err)
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	var out Alias
+	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
+	printAliasRows([]Alias{out})
+}
+
+func aliasCatJSON(keyID int64, namespace, path string) CatResult {
+	metaReq, err := http.NewRequest(http.MethodGet, aliasPathURL(namespace, path), nil)
+	failIfErr(err)
+	metaReq.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	var alias Alias
+	doUploadRequest(metaReq, &alias)
+
+	req, err := http.NewRequest(http.MethodGet, aliasPathURL(namespace, path, "blob"), nil)
+	failIfErr(err)
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	client := newClient()
+	resp, err := client.Do(req)
+	failIfErr(err)
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	failIfErr(err)
+	if resp.StatusCode != http.StatusOK {
+		message := strings.TrimSpace(string(data))
+		if message == "" {
+			message = http.StatusText(resp.StatusCode)
+		}
+		return CatResult{Digest: alias.Digest, Error: &BlobResultError{Message: message, Status: resp.StatusCode}}
+	}
+	return CatResult{Digest: alias.Digest, Size: int64(len(data)), ContentBase64: base64.StdEncoding.EncodeToString(data)}
+}
+
+func aliasCat(keyID int64, args []string) {
+	if len(args) != 2 {
+		die("usage: sht alias cat <namespace> <path>")
+	}
+	if jsonMode {
+		printJSON(CatResponse{Blobs: []CatResult{aliasCatJSON(keyID, args[0], args[1])}})
+		return
+	}
+	req, err := http.NewRequest(http.MethodGet, aliasPathURL(args[0], args[1], "blob"), nil)
+	failIfErr(err)
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	client := newClient()
+	resp, err := client.Do(req)
+	failIfErr(err)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		handleHTTPError(resp)
+	}
+	io.Copy(os.Stdout, resp.Body)
+	fmt.Println()
+}
+
+func aliasSet(keyID int64, args []string) {
+	if len(args) < 3 {
+		die("usage: sht alias set <namespace> <path> <digest> [--expect <version>] [-m <message>]")
+	}
+	namespace := args[0]
+	path := args[1]
+	reqBody := AliasVersionCreateRequest{Digest: args[2]}
+	for i := 3; i < len(args); i++ {
+		switch args[i] {
+		case "--expect", "-e":
+			if i+1 >= len(args) {
+				die("usage: sht alias set <namespace> <path> <digest> [--expect <version>] [-m <message>]")
+			}
+			version, err := strconv.ParseInt(args[i+1], 10, 64)
+			if err != nil || version < 0 {
+				die("invalid expected version")
+			}
+			reqBody.ExpectedVersion = &version
+			i++
+		case "--message", "-m":
+			if i+1 >= len(args) {
+				die("usage: sht alias set <namespace> <path> <digest> [--expect <version>] [-m <message>]")
+			}
+			j := i + 1
+			for j < len(args) && args[j] != "--expect" && args[j] != "-e" && args[j] != "--message" && args[j] != "-m" {
+				j++
+			}
+			if j == i+1 {
+				die("usage: sht alias set <namespace> <path> <digest> [--expect <version>] [-m <message>]")
+			}
+			reqBody.Message = trimPairedQuotes(strings.Join(args[i+1:j], " "))
+			i = j - 1
+		default:
+			die("unknown alias set option: %s", args[i])
+		}
+	}
+	body, err := json.Marshal(reqBody)
+	failIfErr(err)
+	req, err := http.NewRequest(http.MethodPost, aliasPathURL(namespace, path, "versions"), strings.NewReader(string(body)))
+	failIfErr(err)
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	req.Header.Set("Content-Type", "application/json")
+
+	client := newClient()
+	resp, err := client.Do(req)
+	failIfErr(err)
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, readErr := io.ReadAll(resp.Body)
+		failIfErr(readErr)
+		if jsonMode {
+			message := strings.TrimSpace(string(data))
+			if resp.StatusCode == http.StatusConflict && json.Valid(data) {
+				fmt.Fprintln(os.Stderr, message)
+			} else {
+				if message == "" {
+					message = http.StatusText(resp.StatusCode)
+				}
+				printJSONError(message, http.StatusText(resp.StatusCode), resp.StatusCode)
+			}
+			os.Exit(1)
+		}
+		if resp.StatusCode == http.StatusConflict {
+			var conflict AliasConflictResponse
+			_ = json.Unmarshal(data, &conflict)
+			current, err := aliasCurrent(keyID, namespace, path)
+			if err == nil {
+				if current.Digest == reqBody.Digest {
+					fmt.Println("up to date")
+					return
+				}
+				fmt.Printf("stale alias version: current is %d\n", current.CurrentVersionID)
+				os.Exit(1)
+			}
+			if conflict.CurrentVersion > 0 {
+				fmt.Printf("stale alias version: current is %d\n", conflict.CurrentVersion)
+				os.Exit(1)
+			}
+		}
+		message := strings.TrimSpace(string(data))
+		if message == "" {
+			message = http.StatusText(resp.StatusCode)
+		}
+		fmt.Fprintln(os.Stderr, message)
+		os.Exit(1)
+	}
+
+	var out AliasVersion
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		die("bad response: %v", err)
+	}
+	if jsonMode {
+		printJSON(out)
+		return
+	}
+	fmt.Printf("%s %s %d\n", out.Path, out.Digest, out.ID)
+}
+
+func trimPairedQuotes(value string) string {
+	if len(value) < 2 {
+		return value
+	}
+	if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+		return value[1 : len(value)-1]
+	}
+	return value
+}
+
+func aliasCurrent(keyID int64, namespace, path string) (Alias, error) {
+	req, err := http.NewRequest(http.MethodGet, aliasPathURL(namespace, path), nil)
+	if err != nil {
+		return Alias{}, err
+	}
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	client := newClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		return Alias{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return Alias{}, fmt.Errorf("%s", httpErrorMessage(resp))
+	}
+	var out Alias
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return Alias{}, err
+	}
+	return out, nil
+}
+
+func aliasHistory(keyID int64, args []string) {
+	if len(args) != 2 {
+		die("usage: sht alias history <namespace> <path>")
+	}
+	req, err := http.NewRequest(http.MethodGet, aliasPathURL(args[0], args[1], "versions"), nil)
+	failIfErr(err)
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+
+	var out AliasVersionListResponse
+	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
+	rows := make([][]string, 0, len(out.Versions))
+	widths := make([]int, 5)
+	for _, version := range out.Versions {
+		row := []string{
+			strconv.FormatInt(version.ID, 10),
+			version.Digest,
+			version.AuthorUser,
+			version.CreatedAt,
+			version.Message,
+		}
+		for i, value := range row {
+			if len(value) > widths[i] {
+				widths[i] = len(value)
+			}
+		}
+		rows = append(rows, row)
+	}
+	for _, row := range rows {
+		fmt.Printf("%*s  %-*s  %-*s  %-*s", widths[0], row[0], widths[1], row[1], widths[2], row[2], widths[3], row[3])
+		if row[4] != "" {
+			fmt.Printf("  %s", row[4])
+		}
+		fmt.Println()
+	}
+}
+
+func aliasGrant(keyID int64, args []string) {
+	if len(args) != 4 {
+		die("usage: sht alias grant <namespace> <path> <user> <read|write|admin>")
+	}
+	body, err := json.Marshal(AliasGrantRequest{Path: args[1], User: args[2], Role: args[3]})
+	failIfErr(err)
+	req, err := http.NewRequest(http.MethodPost, "http://sht/alias/"+url.PathEscape(args[0])+"/grants", strings.NewReader(string(body)))
+	failIfErr(err)
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	req.Header.Set("Content-Type", "application/json")
+
+	var out AliasGrantResponse
+	doUploadRequest(req, &out)
+	if jsonMode {
+		printJSON(out)
+		return
+	}
+	fmt.Printf("%s %s %s\n", out.Grant.Path, out.Grant.User, out.Grant.Role)
+}
+
+func aliasRevoke(keyID int64, args []string) {
+	if len(args) != 3 {
+		die("usage: sht alias revoke <namespace> <path> <user>")
+	}
+	body, err := json.Marshal(AliasGrantRequest{Path: args[1], User: args[2]})
+	failIfErr(err)
+	req, err := http.NewRequest(http.MethodDelete, "http://sht/alias/"+url.PathEscape(args[0])+"/grants", strings.NewReader(string(body)))
+	failIfErr(err)
+	req.Header.Set("X-SHT-Key-ID", strconv.FormatInt(keyID, 10))
+	req.Header.Set("Content-Type", "application/json")
+
+	doUploadRequest(req, nil)
+	if jsonMode {
+		printJSON(AliasRevokeResponse{Revoked: true, Namespace: args[0], Path: args[1], User: args[2]})
+		return
+	}
+	fmt.Println("revoked")
+}
+
+func aliasCommand(keyID int64, args []string) {
+	if len(args) == 0 || (len(args) == 1 && (args[0] == "-h" || args[0] == "--help")) {
+		aliasUsage()
+		if len(args) == 0 {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	switch args[0] {
+	case "ns", "namespace", "namespaces":
+		if len(args) < 2 {
+			die("usage: sht alias ns list|create")
+		}
+		switch args[1] {
+		case "list":
+			if len(args) != 2 {
+				die("usage: sht alias ns list")
+			}
+			aliasNamespaceList(keyID)
+		case "create":
+			aliasNamespaceCreate(keyID, args[2:])
+		default:
+			die("usage: sht alias ns list|create")
+		}
+	case "list":
+		aliasList(keyID, args[1:])
+	case "get":
+		aliasGet(keyID, args[1:])
+	case "cat":
+		aliasCat(keyID, args[1:])
+	case "set":
+		aliasSet(keyID, args[1:])
+	case "history", "log":
+		aliasHistory(keyID, args[1:])
+	case "grant":
+		aliasGrant(keyID, args[1:])
+	case "revoke":
+		aliasRevoke(keyID, args[1:])
+	default:
+		die("usage: sht alias ns|list|get|cat|set|history|grant|revoke")
+	}
+}
+
+func commandArgs() ([]string, error) {
+	input := os.Getenv("SSH_ORIGINAL_COMMAND")
+	var args []string
+	var b strings.Builder
+	var quote rune
+	inArg := false
+	escaped := false
+
+	for _, r := range input {
+		if escaped {
+			b.WriteRune(r)
+			inArg = true
+			escaped = false
+			continue
+		}
+		if quote != '\'' && r == '\\' {
+			escaped = true
+			inArg = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+				inArg = true
+				continue
+			}
+			b.WriteRune(r)
+			inArg = true
+			continue
+		}
+		switch r {
+		case '\'', '"':
+			quote = r
+			inArg = true
+		case ' ', '\t', '\n', '\r':
+			if inArg {
+				args = append(args, b.String())
+				b.Reset()
+				inArg = false
+			}
+		default:
+			b.WriteRune(r)
+			inArg = true
+		}
+	}
+	if escaped {
+		return nil, fmt.Errorf("unfinished escape")
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated quote")
+	}
+	if inArg {
+		args = append(args, b.String())
+	}
+	return args, nil
 }
 
 func isCommand(arg string) bool {
 	switch arg {
-	case "stat", "cat", "release", "list", "refs", "quota", "manifest", "upload", "upload-chunk", "status", "upload-status", "finalize", "help", "-h", "--help", "shelf", "create", "rename", "set-default", "default", "delete":
+	case "--", "stat", "cat", "release", "list", "refs", "quota", "manifest", "upload", "upload-chunk", "status", "upload-status", "finalize", "help", "-h", "--help", "shelf", "alias", "create", "rename", "set-default", "default", "delete":
 		return true
 	default:
 		return false
@@ -866,6 +1724,11 @@ func scopedCommand(args []string, id int64, shelf string) {
 		return
 	}
 	switch args[0] {
+	case "--":
+		if len(args) != 1 {
+			die("usage: sht <shelf> --")
+		}
+		store(id, shelf)
 	case "release":
 		release(collectDigests(args[1:], "release"), id, shelf)
 	case "list", "refs":
@@ -887,7 +1750,17 @@ func scopedCommand(args []string, id int64, shelf string) {
 }
 
 func main() {
+	args, err := commandArgs()
+	if err != nil {
+		jsonMode = strings.Contains(os.Getenv("SSH_ORIGINAL_COMMAND"), "-j")
+		die("bad command: %v", err)
+	}
+	args, jsonMode = splitJSONFlag(args)
+
 	if len(os.Args) != 3 || os.Args[1] != "id" {
+		if jsonMode {
+			die("malformed command: use command=\"sht id <key id>\" for each key in authorized_keys; don't use ForceCommand in sshd_config")
+		}
 		for i, arg := range os.Args {
 			if i == 0 {
 				fmt.Print("malformed command: ", arg)
@@ -905,8 +1778,6 @@ func main() {
 		die("invalid key id")
 	}
 
-	args := commandArgs()
-
 	if len(args) == 0 {
 		store(id, "")
 		return
@@ -918,6 +1789,11 @@ func main() {
 	}
 
 	switch args[0] {
+	case "--":
+		if len(args) != 1 {
+			die("usage: sht --")
+		}
+		store(id, "")
 	case "stat":
 		stat(collectDigests(args[1:], "stat"), id)
 	case "cat":
@@ -930,6 +1806,8 @@ func main() {
 		quota(id, args[1:])
 	case "shelf":
 		shelfCommand(id, args[1:])
+	case "alias":
+		aliasCommand(id, args[1:])
 	case "manifest":
 		if len(args) != 1 {
 			die("usage: sht manifest < manifest.json")
@@ -952,6 +1830,8 @@ func main() {
 				releaseUsage()
 			case "shelf":
 				shelfUsage()
+			case "alias":
+				aliasUsage()
 			case "list":
 				listUsage()
 			case "upload":
@@ -962,7 +1842,9 @@ func main() {
 		} else {
 			usage()
 		}
-	case "create", "rename", "set-default", "default", "delete":
+	case "set-default", "default":
+		die("usage: sht shelf default ...")
+	case "create", "rename", "delete":
 		die("usage: sht shelf %s ...", args[0])
 	default:
 		die("unknown command: %s", args[0])
