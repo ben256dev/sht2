@@ -4,6 +4,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN_SHTD="$ROOT_DIR/bin/shtd"
 BIN_SHELL="$ROOT_DIR/bin/sht-shell"
 BIN_ADMIN="$ROOT_DIR/bin/sht-admin"
+BIN_GATEWAY="$ROOT_DIR/bin/sht-gateway"
 
 setup_test_env() {
   TEST_TMPDIR="$(mktemp -d)"
