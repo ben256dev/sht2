@@ -79,7 +79,7 @@ SQL
   start_shtd
 
   shelves="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/shelves)"
-  [[ "$shelves" == *'"name":"default"'* ]]
+  [[ "$shelves" == *'"name":"main"'* ]]
 
   created="$(create_shelf app1 3 10)"
   [[ "$created" == *'"name":"app1"'* ]]
@@ -226,7 +226,7 @@ SQL
   code="$(curl -sS -o "$TEST_TMPDIR/delete-default.out" -w "%{http_code}" \
     --unix-socket "$SHT_SOCK_DIR" \
     -H 'X-SHT-Key-ID: 1' \
-    -X DELETE 'http://sht/shelves/default?force=1')"
+    -X DELETE 'http://sht/shelves/main?force=1')"
   [ "$code" = "400" ]
   grep -q 'cannot delete default shelf' "$TEST_TMPDIR/delete-default.out"
 
@@ -317,9 +317,9 @@ SQL
   renamed="$(curl -sS --unix-socket "$SHT_SOCK_DIR" \
     -H 'X-SHT-Key-ID: 1' \
     -H 'Content-Type: application/json' \
-    -X PATCH http://sht/shelves/default \
-    --data-binary '{"name":"main"}')"
-  [[ "$renamed" == *'"name":"main"'* ]]
+    -X PATCH http://sht/shelves/main \
+    --data-binary '{"name":"primary"}')"
+  [[ "$renamed" == *'"name":"primary"'* ]]
   [[ "$renamed" == *'"is_default":true'* ]]
 
   code="$(printf 'plain' | curl -sS -o "$TEST_TMPDIR/plain.out" -w "%{http_code}" \
@@ -350,7 +350,7 @@ SQL
     --unix-socket "$SHT_SOCK_DIR" \
     -H 'X-SHT-Key-ID: 1' \
     -H 'Content-Type: application/json' \
-    -X PATCH http://sht/shelves/main \
+    -X PATCH http://sht/shelves/primary \
     --data-binary '{"name":"app1"}')"
   [ "$code" = "409" ]
 
@@ -358,7 +358,7 @@ SQL
     --unix-socket "$SHT_SOCK_DIR" \
     -H 'X-SHT-Key-ID: 1' \
     -H 'Content-Type: application/json' \
-    -X PATCH http://sht/shelves/main \
+    -X PATCH http://sht/shelves/primary \
     --data-binary '{"name":"default"}')"
   [ "$code" = "200" ]
   grep -q '"name":"default"' "$TEST_TMPDIR/rename-default.out"
@@ -372,8 +372,8 @@ SQL
     --unix-socket "$SHT_SOCK_DIR" \
     -H 'X-SHT-Key-ID: 1' \
     -H 'Content-Type: application/json' \
-    -X PATCH http://sht/shelves/default \
-    --data-binary '{"name":"main"}')"
+    -X PATCH http://sht/shelves/main \
+    --data-binary '{"name":"primary"}')"
   [ "$code" = "200" ]
 
   code="$(printf 'plain' | curl -sS -o "$TEST_TMPDIR/plain.out" -w "%{http_code}" \
@@ -386,7 +386,7 @@ SQL
   create_shelf app1 20 20 >/dev/null
   create_shelf app2 20 20 >/dev/null
   curl -sS -o /dev/null --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X POST http://sht/shelves/app1/default
-  curl -sS -o /dev/null --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X DELETE 'http://sht/shelves/main?force=1'
+  curl -sS -o /dev/null --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X DELETE 'http://sht/shelves/primary?force=1'
 
   code="$(printf 'blocked' | curl -sS -o "$TEST_TMPDIR/blocked.out" -w "%{http_code}" \
     --unix-socket "$SHT_SOCK_DIR" \
@@ -403,11 +403,41 @@ SQL
 
   create_shelf app1 20 20 >/dev/null
   curl -sS -o /dev/null --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X POST http://sht/shelves/app1/default
-  curl -sS -o /dev/null --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X DELETE 'http://sht/shelves/default?force=1'
+  curl -sS -o /dev/null --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' -X DELETE 'http://sht/shelves/main?force=1'
 
   created="$(create_shelf default 20 20)"
   [[ "$created" == *'"name":"default"'* ]]
   [[ "$created" == *'"is_default":false'* ]]
+}
+
+@test "shtd migrates old default shelf name to main" {
+  sqlite3 "$SHT_DB_PATH" "UPDATE shelves SET name = 'default' WHERE user_id = 1 AND is_default = 1"
+  start_shtd
+
+  shelves="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/shelves)"
+  [[ "$shelves" == *'"name":"main"'* ]]
+  [[ "$shelves" != *'"name":"default"'* ]]
+  [[ "$shelves" == *'"is_default":true'* ]]
+}
+
+@test "shtd preserves default shelf name when main already exists" {
+  sqlite3 "$SHT_DB_PATH" <<'SQL'
+UPDATE shelves SET name = 'default' WHERE user_id = 1 AND is_default = 1;
+INSERT INTO shelves (user_id, name, enabled, is_default, max_bytes, max_pending_bytes, pending_bytes)
+VALUES (1, 'main', 1, 0, 20, 20, 0);
+UPDATE users SET multi_shelf_enabled = 1 WHERE id = 1;
+SQL
+  start_shtd
+
+  shelves="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/shelves)"
+  python3 - "$shelves" <<'PY'
+import json
+import sys
+
+shelves = {s["name"]: s for s in json.loads(sys.argv[1])["shelves"]}
+assert shelves["default"]["is_default"] is True
+assert shelves["main"]["is_default"] is False
+PY
 }
 
 @test "shtd migrates old refs onto a default shelf" {
@@ -415,12 +445,12 @@ SQL
   start_shtd
 
   shelves="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/shelves)"
-  [[ "$shelves" == *'"name":"default"'* ]]
+  [[ "$shelves" == *'"name":"main"'* ]]
   [[ "$shelves" == *'"is_default":true'* ]]
 
   refs="$(curl -sS --unix-socket "$SHT_SOCK_DIR" -H 'X-SHT-Key-ID: 1' http://sht/refs)"
   [[ "$refs" == *'"digest":"old-ref-digest"'* ]]
-  [[ "$refs" == *'"shelf":"default"'* ]]
+  [[ "$refs" == *'"shelf":"main"'* ]]
 
   primary_key_count="$(sqlite3 "$SHT_DB_PATH" "SELECT COUNT(*) FROM pragma_table_info('blob_refs') WHERE name = 'shelf_id'")"
   [ "$primary_key_count" = "1" ]

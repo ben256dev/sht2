@@ -35,6 +35,7 @@ const defaultUserMaxBytes int64 = 3 * 1024 * 1024 * 1024
 const defaultUserMaxPendingBytes int64 = defaultUserMaxBytes + defaultUserMaxBytes/4
 const defaultMaxSimpleUploadBytes int64 = 64 * 1024 * 1024
 const defaultChunkSize int64 = 8 * 1024 * 1024
+const defaultShelfName = "main"
 
 var errSimpleUploadTooLarge = errors.New("simple upload too large; use manifest/resumable upload")
 var shelfNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -1904,7 +1905,7 @@ func createShelf(db *sql.DB, userID int64, req ShelfCreateRequest) (Shelf, error
 	if err != nil {
 		return Shelf{}, err
 	}
-	if req.Name != "default" {
+	if req.Name != defaultShelfName {
 		if _, err := db.Exec("UPDATE users SET multi_shelf_enabled = 1 WHERE id = ?", userID); err != nil {
 			return Shelf{}, err
 		}
@@ -2421,7 +2422,7 @@ func ensureSingleDefaultShelves(db *sql.DB) error {
 			SELECT id
 			FROM shelves
 			WHERE user_id = ?
-			ORDER BY CASE WHEN name = 'default' THEN 0 ELSE 1 END, id ASC
+			ORDER BY CASE WHEN name = 'main' THEN 0 WHEN name = 'default' THEN 1 ELSE 2 END, id ASC
 			LIMIT 1
 		`, userID).Scan(&shelfID)
 		if err != nil {
@@ -2886,14 +2887,30 @@ JOIN alias_namespaces ON alias_namespaces.name = users.name;
 }
 
 func migrateShelves(db *sql.DB) error {
-	if _, err := db.Exec(fmt.Sprintf(`
-INSERT OR IGNORE INTO shelves (user_id, name, is_default, max_bytes, max_pending_bytes, pending_bytes)
-SELECT id, 'default', 1, max_bytes, max_pending_bytes, pending_bytes
-FROM users;
-`)); err != nil {
+	if _, err := db.Exec(`
+UPDATE shelves
+SET name = 'main'
+WHERE name = 'default'
+  AND is_default = 1
+  AND NOT EXISTS (
+    SELECT 1
+    FROM shelves AS existing
+    WHERE existing.user_id = shelves.user_id
+      AND existing.name = 'main'
+  );
+`); err != nil {
 		return err
 	}
-	if _, err := db.Exec("UPDATE shelves SET is_default = 1 WHERE name = 'default' AND is_default = 0"); err != nil {
+	if _, err := db.Exec(`
+INSERT OR IGNORE INTO shelves (user_id, name, is_default, max_bytes, max_pending_bytes, pending_bytes)
+SELECT users.id, 'main', 1, users.max_bytes, users.max_pending_bytes, users.pending_bytes
+FROM users
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM shelves
+  WHERE shelves.user_id = users.id
+);
+`); err != nil {
 		return err
 	}
 	if err := ensureSingleDefaultShelves(db); err != nil {

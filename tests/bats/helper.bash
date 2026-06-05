@@ -109,8 +109,8 @@ CREATE TABLE IF NOT EXISTS upload_session_chunks (
 CREATE INDEX IF NOT EXISTS upload_session_chunks_digest ON upload_session_chunks(digest);
 INSERT OR REPLACE INTO users (id, name, enabled, max_bytes, max_pending_bytes, pending_bytes, max_simple_upload_bytes, multi_shelf_enabled) VALUES (1, 'test-user-1', 1, 3221225472, 4026531840, 0, 67108864, 0);
 INSERT OR REPLACE INTO users (id, name, enabled, max_bytes, max_pending_bytes, pending_bytes, max_simple_upload_bytes, multi_shelf_enabled) VALUES (2, 'test-user-2', 1, 3221225472, 4026531840, 0, 67108864, 0);
-INSERT OR REPLACE INTO shelves (id, user_id, name, enabled, is_default, max_bytes, max_pending_bytes, pending_bytes) VALUES (1, 1, 'default', 1, 1, 3221225472, 4026531840, 0);
-INSERT OR REPLACE INTO shelves (id, user_id, name, enabled, is_default, max_bytes, max_pending_bytes, pending_bytes) VALUES (2, 2, 'default', 1, 1, 3221225472, 4026531840, 0);
+INSERT OR REPLACE INTO shelves (id, user_id, name, enabled, is_default, max_bytes, max_pending_bytes, pending_bytes) VALUES (1, 1, 'main', 1, 1, 3221225472, 4026531840, 0);
+INSERT OR REPLACE INTO shelves (id, user_id, name, enabled, is_default, max_bytes, max_pending_bytes, pending_bytes) VALUES (2, 2, 'main', 1, 1, 3221225472, 4026531840, 0);
 INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (1, 1, 'test-key-1', 1);
 INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (2, 2, 'test-key-2', 1);
 INSERT OR REPLACE INTO key_ids (id, user_id, name, enabled) VALUES (3, 1, 'test-key-3', 1);

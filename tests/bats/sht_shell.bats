@@ -37,9 +37,17 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"sht list [fields]"* ]]
   [[ "$output" == *"d  digest"* ]]
-  [[ "$output" == *"h  shelf"* ]]
+  [[ "$output" == *"h  help"* ]]
   [[ "$output" == *"t  state"* ]]
-  [[ "$output" == *"sht list dht"* ]]
+  [[ "$output" == *"sht list dt"* ]]
+
+  run env SSH_ORIGINAL_COMMAND='list help' "$BIN_SHELL" id 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sht list [fields]"* ]]
+
+  run env SSH_ORIGINAL_COMMAND='list -help' "$BIN_SHELL" id 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sht list [fields]"* ]]
 }
 
 @test "sht-shell scoped list help prints command usage" {
@@ -47,6 +55,10 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"sht list [fields]"* ]]
   [[ "$output" == *"sht <shelf> list dt"* ]]
+
+  run env SSH_ORIGINAL_COMMAND='app1 list help' "$BIN_SHELL" id 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sht list [fields]"* ]]
 }
 
 @test "sht-shell digest command help prints command usage" {
@@ -61,6 +73,27 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"sht shelf list"* ]]
   [[ "$output" == *"sht shelf default <name>"* ]]
+
+  run env SSH_ORIGINAL_COMMAND='shelf help' "$BIN_SHELL" id 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sht shelf list"* ]]
+
+  run env SSH_ORIGINAL_COMMAND='shelf bogus' "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sht shelf list"* ]]
+  [[ "$output" != *"list|create"* ]]
+}
+
+@test "sht-shell alias help prints command usage" {
+  run env SSH_ORIGINAL_COMMAND='alias help' "$BIN_SHELL" id 1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"sht alias ns list"* ]]
+  [[ "$output" == *"sht alias set <namespace> <path> <digest>"* ]]
+
+  run env SSH_ORIGINAL_COMMAND='alias bogus' "$BIN_SHELL" id 1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"sht alias ns list"* ]]
+  [[ "$output" != *"ns|list|get"* ]]
 }
 
 @test "sht-shell json help prints structured usage" {
@@ -74,6 +107,18 @@ out = json.loads(sys.argv[1])
 assert out["topic"] == "list"
 assert "sht list [fields]" in out["usage"]
 assert "d  digest" in out["usage"]
+PY
+
+  run env SSH_ORIGINAL_COMMAND='help alias -j' "$BIN_SHELL" id 1
+  [ "$status" -eq 0 ]
+  python3 - "$output" <<'PY'
+import json
+import sys
+
+out = json.loads(sys.argv[1])
+assert out["topic"] == "alias"
+assert "sht alias ns list" in out["usage"]
+assert "sht alias revoke" in out["usage"]
 PY
 
   run env SSH_ORIGINAL_COMMAND='help nope -j' "$BIN_SHELL" id 1
@@ -176,7 +221,7 @@ PY
   [ -n "$digest" ]
 
   refs_out="$(SSH_ORIGINAL_COMMAND='list' "$BIN_SHELL" id 1)"
-  [[ "$refs_out" == *"$digest  default  18  1"* ]]
+  [[ "$refs_out" == *"$digest  main  18  1"* ]]
 }
 
 @test "sht-shell list can print selected fields" {
@@ -199,9 +244,9 @@ PY
   [[ "$refs_out" == *"$d1  clean"* ]]
   [[ "$refs_out" == *"$d2  clean"* ]]
 
-  refs_out="$(SSH_ORIGINAL_COMMAND='list -dht' "$BIN_SHELL" id 1)"
-  [[ "$refs_out" == *"$d1  default  clean"* ]]
-  [[ "$refs_out" == *"$d2  default  clean"* ]]
+  refs_out="$(SSH_ORIGINAL_COMMAND='list' "$BIN_SHELL" id 1)"
+  [[ "$refs_out" == *"$d1  main  3  1"* ]]
+  [[ "$refs_out" == *"$d2  main  3  1"* ]]
 }
 
 @test "sht-shell list pads columns" {
@@ -211,10 +256,10 @@ PY
   SSH_ORIGINAL_COMMAND='shelf create shelf1 20 20' "$BIN_SHELL" id 1 >/dev/null
   d1="$(printf 'same' | SSH_ORIGINAL_COMMAND='shelf1' "$BIN_SHELL" id 1 | tail -n1)"
 
-  refs_out="$(SSH_ORIGINAL_COMMAND='list -dht' "$BIN_SHELL" id 1)"
+  refs_out="$(SSH_ORIGINAL_COMMAND='list' "$BIN_SHELL" id 1)"
 
-  [[ "$refs_out" == *"$d1  shelf1   clean"* ]]
-  [[ "$refs_out" == *"$d2  default  clean"* ]]
+  [[ "$refs_out" == *"$d1  shelf1  4  1"* ]]
+  [[ "$refs_out" == *"$d2  main    5  1"* ]]
 }
 
 @test "sht-shell quota shows total user usage" {
@@ -244,7 +289,7 @@ PY
 
   cat_json="$(SSH_ORIGINAL_COMMAND="cat -j $digest" "$BIN_SHELL" id 1)"
   stat_json="$(SSH_ORIGINAL_COMMAND="-j stat $digest" "$BIN_SHELL" id 1)"
-  list_json="$(SSH_ORIGINAL_COMMAND="list -j dht" "$BIN_SHELL" id 1)"
+  list_json="$(SSH_ORIGINAL_COMMAND="list -j dt" "$BIN_SHELL" id 1)"
   quota_json="$(SSH_ORIGINAL_COMMAND="quota -j" "$BIN_SHELL" id 1)"
 
   python3 - "$upload_json" "$cat_json" "$stat_json" "$list_json" "$quota_json" "$digest" <<'PY'
@@ -506,7 +551,7 @@ PY
   start_shtd
 
   shelves="$(SSH_ORIGINAL_COMMAND='shelf list' "$BIN_SHELL" id 1)"
-  [[ "$shelves" == *"default  0/3221225472  0/4026531840  0  enabled  default"* ]]
+  [[ "$shelves" == *"main  0/3221225472  0/4026531840  0  enabled  default"* ]]
 
   created="$(SSH_ORIGINAL_COMMAND='shelf create app1 3 10' "$BIN_SHELL" id 1)"
   [ "$created" = "app1 3 10 enabled" ]
@@ -526,8 +571,8 @@ PY
   refs_out="$(SSH_ORIGINAL_COMMAND='app1 list -dt' "$BIN_SHELL" id 1)"
   [[ "$refs_out" == *"$digest  clean"* ]]
 
-  refs_out="$(SSH_ORIGINAL_COMMAND='list -dht' "$BIN_SHELL" id 1)"
-  [[ "$refs_out" == *"$digest  app1  clean"* ]]
+  refs_out="$(SSH_ORIGINAL_COMMAND='list' "$BIN_SHELL" id 1)"
+  [[ "$refs_out" == *"$digest  app1  3  1"* ]]
 
   shelves="$(SSH_ORIGINAL_COMMAND='shelf list' "$BIN_SHELL" id 1)"
   [[ "$shelves" == *"app1"* ]]
@@ -572,7 +617,7 @@ PY
   [ "$status" -ne 0 ]
   [[ "$output" == *"usage: sht shelf delete <name> --force"* ]]
 
-  run env SSH_ORIGINAL_COMMAND='shelf delete default --force' "$BIN_SHELL" id 1
+  run env SSH_ORIGINAL_COMMAND='shelf delete main --force' "$BIN_SHELL" id 1
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot delete default shelf"* ]]
 
@@ -596,8 +641,8 @@ PY
 @test "sht-shell can rename shelves and set default" {
   start_shtd
 
-  renamed="$(SSH_ORIGINAL_COMMAND='shelf rename default main' "$BIN_SHELL" id 1)"
-  [[ "$renamed" == *"main 3221225472 4026531840 enabled default"* ]]
+  renamed="$(SSH_ORIGINAL_COMMAND='shelf rename main primary' "$BIN_SHELL" id 1)"
+  [[ "$renamed" == *"primary 3221225472 4026531840 enabled default"* ]]
 
   digest="$(printf 'plain' | SSH_ORIGINAL_COMMAND=' ' "$BIN_SHELL" id 1 | tail -n1)"
   [ -n "$digest" ]
@@ -613,7 +658,7 @@ PY
   [[ "$shelves" == *"app1"* ]]
   [[ "$shelves" == *"6/20"* ]]
   [[ "$shelves" == *"1  enabled  default"* ]]
-  [[ "$shelves" == *"main"* ]]
+  [[ "$shelves" == *"primary"* ]]
   [[ "$shelves" == *"5/3221225472"* ]]
   [[ "$shelves" == *"5/4026531840"* ]]
 
@@ -621,7 +666,7 @@ PY
   [ "$status" -ne 0 ]
   [[ "$output" == *"cannot delete default shelf"* ]]
 
-  run env SSH_ORIGINAL_COMMAND='shelf rename main app1' "$BIN_SHELL" id 1
+  run env SSH_ORIGINAL_COMMAND='shelf rename primary app1' "$BIN_SHELL" id 1
   [ "$status" -ne 0 ]
   [[ "$output" == *"shelf already exists"* ]]
 }
@@ -631,7 +676,7 @@ PY
 
   SSH_ORIGINAL_COMMAND='shelf create app1 20 20' "$BIN_SHELL" id 1 >/dev/null
   SSH_ORIGINAL_COMMAND='shelf default app1' "$BIN_SHELL" id 1 >/dev/null
-  SSH_ORIGINAL_COMMAND='shelf delete default --force' "$BIN_SHELL" id 1 >/dev/null
+  SSH_ORIGINAL_COMMAND='shelf delete main --force' "$BIN_SHELL" id 1 >/dev/null
 
   created="$(SSH_ORIGINAL_COMMAND='shelf create default 20 20' "$BIN_SHELL" id 1)"
   [ "$created" = "default 20 20 enabled" ]
