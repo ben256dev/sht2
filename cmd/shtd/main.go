@@ -2734,6 +2734,7 @@ CREATE TABLE IF NOT EXISTS key_ids (
 	id INTEGER PRIMARY KEY,
 	user_id INTEGER NOT NULL,
 	name TEXT NOT NULL,
+	public_key TEXT,
 	enabled INTEGER NOT NULL DEFAULT 1,
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 	FOREIGN KEY(user_id) REFERENCES users(id)
@@ -2860,6 +2861,16 @@ CREATE INDEX IF NOT EXISTS alias_versions_namespace_path ON alias_versions(names
 		log.Fatal(err)
 	}
 	if err := ensureColumn(db, "shelves", "is_default", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		log.Fatal(err)
+	}
+	if err := ensureColumn(db, "key_ids", "public_key", "TEXT"); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := db.Exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS key_ids_public_key_unique
+ON key_ids(public_key)
+WHERE public_key IS NOT NULL
+`); err != nil {
 		log.Fatal(err)
 	}
 	if err := migrateShelves(db); err != nil {
