@@ -25,11 +25,13 @@ const DefaultShelfName = "main"
 var identifierPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 type User struct {
-	ID              int64  `json:"id"`
-	Name            string `json:"name"`
-	Enabled         bool   `json:"enabled"`
-	ExternalSubject string `json:"external_subject,omitempty"`
-	DisplayName     string `json:"display_name,omitempty"`
+	ID               int64  `json:"id"`
+	Name             string `json:"name"`
+	Enabled          bool   `json:"enabled"`
+	Kind             string `json:"kind"`
+	IdentityProvider string `json:"identity_provider"`
+	ExternalSubject  string `json:"external_subject,omitempty"`
+	DisplayName      string `json:"display_name,omitempty"`
 }
 
 type Key struct {
@@ -95,6 +97,8 @@ CREATE TABLE IF NOT EXISTS users (
 	pending_bytes INTEGER NOT NULL DEFAULT 0,
 	max_simple_upload_bytes INTEGER NOT NULL DEFAULT %d,
 	multi_shelf_enabled INTEGER NOT NULL DEFAULT 0,
+	kind TEXT NOT NULL DEFAULT 'internal',
+	identity_provider TEXT NOT NULL DEFAULT 'local',
 	external_subject TEXT,
 	display_name TEXT,
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -156,6 +160,12 @@ CREATE TABLE IF NOT EXISTS alias_grants (
 	if err := ensureColumn(db, "users", "multi_shelf_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := ensureColumn(db, "users", "kind", "TEXT NOT NULL DEFAULT 'internal'"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "users", "identity_provider", "TEXT NOT NULL DEFAULT 'local'"); err != nil {
+		return err
+	}
 	if err := ensureColumn(db, "users", "external_subject", "TEXT"); err != nil {
 		return err
 	}
@@ -176,6 +186,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS key_ids_public_key_unique
 ON key_ids(public_key)
 WHERE public_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS alias_grants_user_id ON alias_grants(user_id);
+`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+UPDATE users
+SET kind = 'external',
+    identity_provider = 'keycloak'
+WHERE external_subject IS NOT NULL
+  AND (kind = 'internal' OR identity_provider = 'local');
 `); err != nil {
 		return err
 	}
@@ -222,10 +241,10 @@ func userByExternalSubject(db *sql.DB, subject string) (User, error) {
 	var enabled int
 	var externalSubject, displayName sql.NullString
 	err := db.QueryRow(`
-		SELECT id, name, enabled, external_subject, display_name
+		SELECT id, name, enabled, kind, identity_provider, external_subject, display_name
 		FROM users
 		WHERE external_subject = ?
-	`, subject).Scan(&u.ID, &u.Name, &enabled, &externalSubject, &displayName)
+	`, subject).Scan(&u.ID, &u.Name, &enabled, &u.Kind, &u.IdentityProvider, &externalSubject, &displayName)
 	if err != nil {
 		return User{}, err
 	}
@@ -236,7 +255,11 @@ func userByExternalSubject(db *sql.DB, subject string) (User, error) {
 }
 
 func CreateUser(db *sql.DB, name string) (User, error) {
-	return createUser(db, name, "", "")
+	return createUser(db, name, "internal", "local", "", "")
+}
+
+func CreateServiceUser(db *sql.DB, name string) (User, error) {
+	return createUser(db, name, "service", "system", "", "")
 }
 
 func CreateMappedUser(db *sql.DB, subject, username string) (User, error) {
@@ -260,12 +283,21 @@ func CreateMappedUser(db *sql.DB, subject, username string) (User, error) {
 	} else if err != sql.ErrNoRows {
 		return User{}, err
 	}
-	return createUser(db, name, subject, username)
+	return createUser(db, name, "external", "keycloak", subject, username)
 }
 
-func createUser(db *sql.DB, name, externalSubject, displayName string) (User, error) {
+func createUser(db *sql.DB, name, kind, identityProvider, externalSubject, displayName string) (User, error) {
 	if err := ValidateIdentifier("user name", name); err != nil {
 		return User{}, err
+	}
+	if err := validateUserKind(kind); err != nil {
+		return User{}, err
+	}
+	if err := validateIdentityProvider(identityProvider); err != nil {
+		return User{}, err
+	}
+	if kind == "external" && strings.TrimSpace(externalSubject) == "" {
+		return User{}, fmt.Errorf("external users require external subject")
 	}
 	tx, err := db.Begin()
 	if err != nil {
@@ -276,14 +308,14 @@ func createUser(db *sql.DB, name, externalSubject, displayName string) (User, er
 	var result sql.Result
 	if externalSubject == "" {
 		result, err = tx.Exec(`
-INSERT INTO users (name, enabled, max_bytes, max_pending_bytes, pending_bytes, max_simple_upload_bytes, multi_shelf_enabled)
-VALUES (?, 1, ?, ?, 0, ?, 0)
-`, name, DefaultUserMaxBytes, DefaultUserMaxPendingBytes, DefaultMaxSimpleUploadBytes)
+INSERT INTO users (name, enabled, max_bytes, max_pending_bytes, pending_bytes, max_simple_upload_bytes, multi_shelf_enabled, kind, identity_provider)
+VALUES (?, 1, ?, ?, 0, ?, 0, ?, ?)
+`, name, DefaultUserMaxBytes, DefaultUserMaxPendingBytes, DefaultMaxSimpleUploadBytes, kind, identityProvider)
 	} else {
 		result, err = tx.Exec(`
-INSERT INTO users (name, enabled, max_bytes, max_pending_bytes, pending_bytes, max_simple_upload_bytes, multi_shelf_enabled, external_subject, display_name)
-VALUES (?, 1, ?, ?, 0, ?, 0, ?, ?)
-`, name, DefaultUserMaxBytes, DefaultUserMaxPendingBytes, DefaultMaxSimpleUploadBytes, externalSubject, displayName)
+INSERT INTO users (name, enabled, max_bytes, max_pending_bytes, pending_bytes, max_simple_upload_bytes, multi_shelf_enabled, kind, identity_provider, external_subject, display_name)
+VALUES (?, 1, ?, ?, 0, ?, 0, ?, ?, ?, ?)
+`, name, DefaultUserMaxBytes, DefaultUserMaxPendingBytes, DefaultMaxSimpleUploadBytes, kind, identityProvider, externalSubject, displayName)
 	}
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
@@ -315,7 +347,25 @@ VALUES (?, ?, 1, 1, ?, ?, 0)
 	if err := tx.Commit(); err != nil {
 		return User{}, err
 	}
-	return User{ID: userID, Name: name, Enabled: true, ExternalSubject: externalSubject, DisplayName: displayName}, nil
+	return User{ID: userID, Name: name, Enabled: true, Kind: kind, IdentityProvider: identityProvider, ExternalSubject: externalSubject, DisplayName: displayName}, nil
+}
+
+func validateUserKind(kind string) error {
+	switch kind {
+	case "internal", "external", "service":
+		return nil
+	default:
+		return fmt.Errorf("invalid user kind")
+	}
+}
+
+func validateIdentityProvider(provider string) error {
+	switch provider {
+	case "local", "keycloak", "system":
+		return nil
+	default:
+		return fmt.Errorf("invalid identity provider")
+	}
 }
 
 func safeUserName(username string) string {
@@ -348,7 +398,7 @@ func shortSubjectHash(subject string) string {
 }
 
 func ListUsers(db *sql.DB) ([]User, error) {
-	rows, err := db.Query("SELECT id, name, enabled, COALESCE(external_subject, ''), COALESCE(display_name, '') FROM users ORDER BY id")
+	rows, err := db.Query("SELECT id, name, enabled, kind, identity_provider, COALESCE(external_subject, ''), COALESCE(display_name, '') FROM users ORDER BY id")
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +408,7 @@ func ListUsers(db *sql.DB) ([]User, error) {
 	for rows.Next() {
 		var u User
 		var enabled int
-		if err := rows.Scan(&u.ID, &u.Name, &enabled, &u.ExternalSubject, &u.DisplayName); err != nil {
+		if err := rows.Scan(&u.ID, &u.Name, &enabled, &u.Kind, &u.IdentityProvider, &u.ExternalSubject, &u.DisplayName); err != nil {
 			return nil, err
 		}
 		u.Enabled = enabled == 1
@@ -421,6 +471,31 @@ func AddKeyFromFile(db *sql.DB, userName, keyName, publicKeyPath string) (Key, e
 		return Key{}, err
 	}
 	return AddKeyForUserName(db, userName, keyName, string(publicKeyBytes))
+}
+
+func EnsureGatewayKeyForUser(db *sql.DB, userID int64) (int64, error) {
+	var keyID int64
+	err := db.QueryRow(`
+		SELECT id
+		FROM key_ids
+		WHERE user_id = ?
+		  AND name = 'gateway'
+		  AND public_key IS NULL
+		ORDER BY id
+		LIMIT 1
+	`, userID).Scan(&keyID)
+	if err == nil {
+		_, err = db.Exec("UPDATE key_ids SET enabled = 1 WHERE id = ?", keyID)
+		return keyID, err
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+	result, err := db.Exec("INSERT INTO key_ids (user_id, name, public_key, enabled) VALUES (?, 'gateway', NULL, 1)", userID)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
 }
 
 func ListKeys(db *sql.DB, userName string) ([]Key, error) {

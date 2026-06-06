@@ -58,8 +58,8 @@ write_public_key() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"alice enabled"* ]]
 
-  user_row="$(sqlite3 "$SHT_DB_PATH" "SELECT id, enabled, max_bytes, max_pending_bytes, max_simple_upload_bytes, multi_shelf_enabled FROM users WHERE name = 'alice';")"
-  [[ "$user_row" == *"|1|3221225472|4026531840|67108864|0" ]]
+  user_row="$(sqlite3 "$SHT_DB_PATH" "SELECT id, enabled, max_bytes, max_pending_bytes, max_simple_upload_bytes, multi_shelf_enabled, kind, identity_provider FROM users WHERE name = 'alice';")"
+  [[ "$user_row" == *"|1|3221225472|4026531840|67108864|0|internal|local" ]]
 
   user_id="$(sqlite3 "$SHT_DB_PATH" "SELECT id FROM users WHERE name = 'alice';")"
   shelf_row="$(sqlite3 "$SHT_DB_PATH" "SELECT name, enabled, is_default, max_bytes, max_pending_bytes FROM shelves WHERE user_id = $user_id;")"
@@ -69,6 +69,30 @@ write_public_key() {
   [ -n "$ns_id" ]
   grant_row="$(sqlite3 "$SHT_DB_PATH" "SELECT path, user_id, role FROM alias_grants WHERE namespace_id = $ns_id;")"
   [ "$grant_row" = "|$user_id|admin" ]
+}
+
+@test "sht-admin service create creates service user state" {
+  run "$BIN_ADMIN" service create shthub
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"shthub enabled service system"* ]]
+
+  user_row="$(sqlite3 "$SHT_DB_PATH" "SELECT id, enabled, kind, identity_provider, COALESCE(external_subject, '') FROM users WHERE name = 'shthub';")"
+  [[ "$user_row" == *"|1|service|system|" ]]
+
+  user_id="$(sqlite3 "$SHT_DB_PATH" "SELECT id FROM users WHERE name = 'shthub';")"
+  [ "$(sqlite3 "$SHT_DB_PATH" "SELECT COUNT(*) FROM shelves WHERE user_id = $user_id AND name = 'main' AND is_default = 1;")" = "1" ]
+  ns_id="$(sqlite3 "$SHT_DB_PATH" "SELECT id FROM alias_namespaces WHERE name = 'shthub' AND owner_user_id = $user_id;")"
+  [ -n "$ns_id" ]
+  [ "$(sqlite3 "$SHT_DB_PATH" "SELECT role FROM alias_grants WHERE namespace_id = $ns_id AND user_id = $user_id AND path = '';")" = "admin" ]
+}
+
+@test "sht-admin user list shows kind and provider" {
+  "$BIN_ADMIN" user create alice >/dev/null
+  "$BIN_ADMIN" service create shthub >/dev/null
+
+  users="$("$BIN_ADMIN" user list)"
+  [[ "$users" == *"alice enabled internal local"* ]]
+  [[ "$users" == *"shthub enabled service system"* ]]
 }
 
 @test "sht-admin user create rejects duplicate and invalid names" {
@@ -144,6 +168,7 @@ write_public_key() {
   run "$BIN_ADMIN" help
   [ "$status" -eq 0 ]
   [[ "$output" == *"sht-admin user create <name>"* ]]
+  [[ "$output" == *"sht-admin service create <name>"* ]]
   [[ "$output" == *"sht-admin key add <user> <name> <public-key-file>"* ]]
 
   run "$BIN_ADMIN" user

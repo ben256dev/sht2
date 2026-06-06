@@ -49,3 +49,12 @@ teardown() {
     --data-binary @-)"
   [ "$code" = "200" ]
 }
+
+@test "shtd migrates legacy external subjects to external keycloak users" {
+  sqlite3 "$SHT_DB_PATH" "ALTER TABLE users ADD COLUMN external_subject TEXT; UPDATE users SET external_subject = 'kc-legacy-subject' WHERE id = 1;"
+
+  start_shtd
+
+  row="$(sqlite3 "$SHT_DB_PATH" "SELECT kind, identity_provider FROM users WHERE id = 1;")"
+  [ "$row" = "external|keycloak" ]
+}

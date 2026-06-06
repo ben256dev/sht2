@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -20,6 +22,7 @@ type config struct {
 	addr               string
 	dbPath             string
 	authorizedKeysPath string
+	sockDir            string
 	oidcIssuer         string
 	oidcClientID       string
 	usernameClaim      string
@@ -29,6 +32,7 @@ type config struct {
 type server struct {
 	cfg      config
 	db       *sql.DB
+	client   *http.Client
 	verifier *oidc.IDTokenVerifier
 }
 
@@ -59,6 +63,7 @@ func loadConfig() config {
 		addr:               getenv("SHT_GATEWAY_ADDR", ":8080"),
 		dbPath:             getenv("SHT_DB_PATH", admin.DefaultDBPath),
 		authorizedKeysPath: os.Getenv("SHT_AUTHORIZED_KEYS_PATH"),
+		sockDir:            getenv("SHT_SOCK_DIR", "/run/sht/sht.sock"),
 		oidcIssuer:         os.Getenv("SHT_OIDC_ISSUER"),
 		oidcClientID:       os.Getenv("SHT_OIDC_CLIENT_ID"),
 		usernameClaim:      getenv("SHT_OIDC_USERNAME_CLAIM", "preferred_username"),
@@ -72,6 +77,11 @@ func newServer(ctx context.Context, cfg config) (*server, error) {
 		return nil, err
 	}
 	s := &server{cfg: cfg, db: db}
+	s.client = &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", cfg.sockDir)
+		},
+	}}
 	if !cfg.devAuth {
 		if cfg.oidcIssuer == "" || cfg.oidcClientID == "" {
 			db.Close()
@@ -93,6 +103,13 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /me", s.withAuth(s.me))
 	mux.HandleFunc("GET /keys", s.withAuth(s.keys))
 	mux.HandleFunc("POST /keys", s.withAuth(s.createKey))
+	mux.HandleFunc("GET /blob/{digest}", s.publicBlob)
+	mux.HandleFunc("HEAD /blob/{digest}", s.publicBlob)
+	mux.HandleFunc("POST /blob", s.withAuth(s.uploadBlob))
+	mux.HandleFunc("POST /uploads", s.withAuth(s.uploads))
+	mux.HandleFunc("GET /uploads/{digest}", s.withAuth(s.uploads))
+	mux.HandleFunc("POST /uploads/{digest}/finalize", s.withAuth(s.uploads))
+	mux.HandleFunc("PUT /uploads/{digest}/chunks/{index}", s.withAuth(s.uploads))
 	return mux
 }
 
@@ -127,6 +144,13 @@ func (s *server) keys(w http.ResponseWriter, r *http.Request, ident identity) {
 	if keys == nil {
 		keys = []admin.Key{}
 	}
+	publicKeys := keys[:0]
+	for _, key := range keys {
+		if key.PublicKey != "" {
+			publicKeys = append(publicKeys, key)
+		}
+	}
+	keys = publicKeys
 	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
 }
 
@@ -157,6 +181,84 @@ func (s *server) createKey(w http.ResponseWriter, r *http.Request, ident identit
 		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"key": key})
+}
+
+func (s *server) publicBlob(w http.ResponseWriter, r *http.Request) {
+	digest := r.PathValue("digest")
+	s.proxySHTD(w, r, "/public/blob/"+digest, 0, "")
+}
+
+func (s *server) uploadBlob(w http.ResponseWriter, r *http.Request, ident identity) {
+	keyID, err := s.gatewayKeyID(ident)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.proxySHTD(w, r, "/blob", keyID, requestShelf(r))
+}
+
+func (s *server) uploads(w http.ResponseWriter, r *http.Request, ident identity) {
+	keyID, err := s.gatewayKeyID(ident)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.proxySHTD(w, r, r.URL.Path, keyID, requestShelf(r))
+}
+
+func (s *server) gatewayKeyID(ident identity) (int64, error) {
+	u, err := admin.CreateMappedUser(s.db, ident.Subject, ident.Username)
+	if err != nil {
+		return 0, err
+	}
+	return admin.EnsureGatewayKeyForUser(s.db, u.ID)
+}
+
+func requestShelf(r *http.Request) string {
+	if shelf := strings.TrimSpace(r.Header.Get("X-SHT-Shelf")); shelf != "" {
+		return shelf
+	}
+	return strings.TrimSpace(r.URL.Query().Get("shelf"))
+}
+
+func (s *server) proxySHTD(w http.ResponseWriter, r *http.Request, path string, keyID int64, shelf string) {
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, "http://sht"+path, r.Body)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if contentType := r.Header.Get("Content-Type"); contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if r.ContentLength >= 0 {
+		req.ContentLength = r.ContentLength
+	}
+	if keyID > 0 {
+		req.Header.Set("X-SHT-Key-ID", fmt.Sprintf("%d", keyID))
+	}
+	if shelf != "" {
+		req.Header.Set("X-SHT-Shelf", shelf)
+	}
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	for key, values := range resp.Header {
+		if strings.EqualFold(key, "Connection") {
+			continue
+		}
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	if r.Method != http.MethodHead {
+		_, _ = io.Copy(w, resp.Body)
+	}
 }
 
 func (s *server) withAuth(next func(http.ResponseWriter, *http.Request, identity)) http.HandlerFunc {

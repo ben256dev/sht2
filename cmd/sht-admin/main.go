@@ -25,6 +25,7 @@ usage:
   sht-admin user create <name>
   sht-admin user list
   sht-admin user disable <name>
+  sht-admin service create <name>
   sht-admin key add <user> <name> <public-key-file>
   sht-admin key list [user]
   sht-admin key disable <key-id>
@@ -47,6 +48,13 @@ usage:
   sht-admin key add <user> <name> <public-key-file>
   sht-admin key list [user]
   sht-admin key disable <key-id>
+`)
+}
+
+func serviceUsage() string {
+	return strings.TrimSpace(`
+usage:
+  sht-admin service create <name>
 `)
 }
 
@@ -120,7 +128,7 @@ func userCommand(args []string) error {
 			if u.Enabled {
 				state = "enabled"
 			}
-			fmt.Printf("%d %s %s\n", u.ID, u.Name, state)
+			fmt.Printf("%d %s %s %s %s\n", u.ID, u.Name, state, u.Kind, u.IdentityProvider)
 		}
 		return nil
 	case "disable":
@@ -134,6 +142,36 @@ func userCommand(args []string) error {
 		return nil
 	default:
 		return fmt.Errorf("unknown user command: %s\n%s", args[0], userUsage())
+	}
+}
+
+func serviceCommand(args []string) error {
+	db, err := admin.OpenDB(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		fmt.Println(serviceUsage())
+		if len(args) == 0 {
+			return fmt.Errorf("missing service command")
+		}
+		return nil
+	}
+	switch args[0] {
+	case "create":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: sht-admin service create <name>")
+		}
+		u, err := admin.CreateServiceUser(db, args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%d %s enabled service system\n", u.ID, u.Name)
+		return nil
+	default:
+		return fmt.Errorf("unknown service command: %s\n%s", args[0], serviceUsage())
 	}
 }
 
@@ -228,6 +266,8 @@ func main() {
 		err = userCommand(args[1:])
 	case args[0] == "key":
 		err = keyCommand(args[1:])
+	case args[0] == "service":
+		err = serviceCommand(args[1:])
 	case args[0] == "authorized-keys":
 		err = fmt.Errorf("unknown authorized-keys command\n%s", authorizedKeysUsage())
 	default:

@@ -2693,6 +2693,37 @@ func handleBlobPath(db *sql.DB, w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, digest, info.ModTime(), f)
 }
 
+func handlePublicBlobPath(db *sql.DB, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	digest := strings.TrimPrefix(r.URL.Path, "/public/blob/")
+	if digest == "" || strings.Contains(digest, "/") || strings.Contains(digest, "..") || !validDigest(digest) {
+		http.Error(w, "invalid digest", http.StatusBadRequest)
+		return
+	}
+
+	manifest, err := manifestForDigest(db, digest)
+	if err == sql.ErrNoRows {
+		http.Error(w, "blob not found", http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		http.Error(w, "failed to read blob manifest", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Length", strconv.FormatInt(manifest.Size, 10))
+	if r.Method == http.MethodHead {
+		return
+	}
+	if err := copyManifestBlob(w, manifest); err != nil {
+		http.Error(w, "failed to read blob", http.StatusInternalServerError)
+	}
+}
+
 func openDB(path string) *sql.DB {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -2713,6 +2744,8 @@ CREATE TABLE IF NOT EXISTS users (
 	pending_bytes INTEGER NOT NULL DEFAULT 0,
 	max_simple_upload_bytes INTEGER NOT NULL DEFAULT %d,
 	multi_shelf_enabled INTEGER NOT NULL DEFAULT 0,
+	kind TEXT NOT NULL DEFAULT 'internal',
+	identity_provider TEXT NOT NULL DEFAULT 'local',
 	external_subject TEXT,
 	display_name TEXT,
 	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -2862,6 +2895,12 @@ CREATE INDEX IF NOT EXISTS alias_versions_namespace_path ON alias_versions(names
 	if err := ensureColumn(db, "users", "multi_shelf_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		log.Fatal(err)
 	}
+	if err := ensureColumn(db, "users", "kind", "TEXT NOT NULL DEFAULT 'internal'"); err != nil {
+		log.Fatal(err)
+	}
+	if err := ensureColumn(db, "users", "identity_provider", "TEXT NOT NULL DEFAULT 'local'"); err != nil {
+		log.Fatal(err)
+	}
 	if err := ensureColumn(db, "users", "external_subject", "TEXT"); err != nil {
 		log.Fatal(err)
 	}
@@ -2882,6 +2921,15 @@ WHERE public_key IS NOT NULL
 CREATE UNIQUE INDEX IF NOT EXISTS users_external_subject_unique
 ON users(external_subject)
 WHERE external_subject IS NOT NULL
+`); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := db.Exec(`
+UPDATE users
+SET kind = 'external',
+    identity_provider = 'keycloak'
+WHERE external_subject IS NOT NULL
+  AND (kind = 'internal' OR identity_provider = 'local')
 `); err != nil {
 		log.Fatal(err)
 	}
@@ -3159,6 +3207,10 @@ func main() {
 	mux.HandleFunc("/uploads/", requirePrincipal(db, func(w http.ResponseWriter, r *http.Request) {
 		handleUploadPath(db, w, r)
 	}))
+
+	mux.HandleFunc("/public/blob/", func(w http.ResponseWriter, r *http.Request) {
+		handlePublicBlobPath(db, w, r)
+	})
 
 	mux.HandleFunc("/blob/", requirePrincipal(db, func(w http.ResponseWriter, r *http.Request) {
 		handleBlobPath(db, w, r)
